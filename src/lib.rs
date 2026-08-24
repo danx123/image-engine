@@ -66,12 +66,13 @@ type CvResult<T> = Result<T, EngineError>;
 // otomatis. `unsendable` bikin instance-nya cuma boleh diakses dari thread
 // Python yang bikin dia — cukup buat kasus kita karena semua fungsi di sini
 // dipanggil sinkron dari satu thread Python yang sama.
-// `from_py_object`: PyMat derive Clone, dan pyo3 baru bikin auto-derive
-// FromPyObject-lewat-Clone jadi opt-in. Kita PAKAI opsi ini (bukan
-// skip_from_py_object) karena merge()/hconcat()/vconcat() di bawah nerima
-// `Vec<PyMat>` sebagai argumen Python — itu butuh PyMat: FromPyObject biar
-// tiap elemen list Python bisa di-extract (clone) jadi PyMat.
-#[pyclass(unsendable, from_py_object)]
+// CATATAN: sempat nyoba tambahin attribute `from_py_object`/`skip_from_py_object`
+// buat ngilangin warning deprecated di FromPyObject-via-Clone, TERNYATA versi
+// pyo3 yang beneran ke-resolve di sini belum kenal attribute itu sama sekali
+// (bukan salah satu opsi valid) — jadi dibiarin default aja (warning-nya gak
+// bahaya, cuma warning, bukan error, dan default behavior-nya tetap bikin
+// Vec<PyMat> di merge()/hconcat()/vconcat() bisa jalan).
+#[pyclass(unsendable)]
 #[derive(Clone)]
 struct PyMat {
     inner: Mat,
