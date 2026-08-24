@@ -18,7 +18,7 @@ numpy = "0.22"
 ndarray = "0.15"
 
 opencv = {
-    version = "0.90",
+    version = "0.90.0",
     default-features = false,  # KUNCI: matikan SEMUA fitur bawaan
     features = [
         "opencv-480",           # Versi sama dengan opencv-python 4.8.x
