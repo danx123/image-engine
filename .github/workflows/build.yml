@@ -26,13 +26,6 @@ jobs:
       - name: Checkout image_engine
         uses: actions/checkout@v4
 
-      - name: Checkout OpenCV source
-        uses: actions/checkout@v4
-        with:
-          repository: opencv/opencv
-          ref: ${{ env.OPENCV_VERSION }}
-          path: opencv-src
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -41,14 +34,37 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Cache OpenCV build terpisah dari cache cargo, key-nya termasuk versi
-      # + isi file ini sendiri (kalau flag CMake berubah, cache otomatis miss).
+      # Cache pip (maturin, delvewheel) — kecil, tapi gratisan.
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: ${{ runner.os }}-pip-maturin-delvewheel
+
+      # Smarter cargo caching daripada actions/cache manual: key otomatis
+      # ikut rustc version + target triple + Cargo.lock, dan tau artifact
+      # mana yang gak perlu ke-cache (jadi ukuran cache lebih kecil, restore
+      # lebih cepat).
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Cache OpenCV build DULUAN, sebelum checkout source-nya — biar kalau
+      # cache-nya hit, gak perlu clone repo opencv/opencv (~500MB+) sama
+      # sekali lagi tiap run.
       - name: Cache OpenCV build
         id: cache-opencv
         uses: actions/cache@v4
         with:
           path: ${{ env.OPENCV_INSTALL_DIR }}
           key: ${{ runner.os }}-opencv-${{ env.OPENCV_VERSION }}-${{ hashFiles('.github/workflows/build.yml') }}
+
+      - name: Checkout OpenCV source
+        if: steps.cache-opencv.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: opencv/opencv
+          ref: ${{ env.OPENCV_VERSION }}
+          path: opencv-src
 
       # OPENCV_BUILD di config.toml lama TIDAK dibaca opencv-rust — crate itu
       # cuma discovery, gak pernah build OpenCV sendiri. Jadi OpenCV harus
@@ -151,17 +167,6 @@ jobs:
           # cmake/vcpkg yang kepancing duluan dan bikin build gagal walaupun
           # env var manual udah bener.
           echo "OPENCV_DISABLE_PROBES=pkg_config,cmake,vcpkg_cmake,vcpkg" >> $env:GITHUB_ENV
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: Install maturin & delvewheel
         run: pip install maturin delvewheel
