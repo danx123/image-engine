@@ -8,6 +8,12 @@ on:
     branches: [ main ]
   workflow_dispatch: {}
 
+env:
+  # Versi OpenCV yang dipakai — samain dengan opencv-480 yang tadinya
+  # ditulis sebagai feature (sekarang dikunci di sini, bukan lewat Cargo).
+  OPENCV_VERSION: "4.8.0"
+  OPENCV_INSTALL_DIR: ${{ github.workspace }}\opencv-install
+
 jobs:
   build-windows:
     name: Build wheel (Windows x64)
@@ -17,8 +23,15 @@ jobs:
         python-version: ["3.13"]
 
     steps:
-      - name: Checkout
+      - name: Checkout image_engine
         uses: actions/checkout@v4
+
+      - name: Checkout OpenCV source
+        uses: actions/checkout@v4
+        with:
+          repository: opencv/opencv
+          ref: ${{ env.OPENCV_VERSION }}
+          path: opencv-src
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -28,7 +41,91 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo & OpenCV build
+      # Cache OpenCV build terpisah dari cache cargo, key-nya termasuk versi
+      # + isi file ini sendiri (kalau flag CMake berubah, cache otomatis miss).
+      - name: Cache OpenCV build
+        id: cache-opencv
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.OPENCV_INSTALL_DIR }}
+          key: ${{ runner.os }}-opencv-${{ env.OPENCV_VERSION }}-${{ hashFiles('.github/workflows/build.yml') }}
+
+      # OPENCV_BUILD di config.toml lama TIDAK dibaca opencv-rust — crate itu
+      # cuma discovery, gak pernah build OpenCV sendiri. Jadi OpenCV harus
+      # di-build manual di sini, pakai persis flag minimal yang sebelumnya
+      # ada di config.toml. BUILD_SHARED_LIBS=OFF + static CRT dinamis biar
+      # hasil akhirnya nempel jadi satu .pyd, gak perlu ship DLL terpisah.
+      - name: Build OpenCV (minimal, static)
+        if: steps.cache-opencv.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          cmake -S opencv-src -B opencv-build -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_INSTALL_PREFIX="${{ env.OPENCV_INSTALL_DIR }}" `
+            -DBUILD_SHARED_LIBS=OFF `
+            -DBUILD_WITH_STATIC_CRT=OFF `
+            -DBUILD_opencv_core=ON `
+            -DBUILD_opencv_imgcodecs=ON `
+            -DBUILD_opencv_imgproc=ON `
+            -DBUILD_opencv_photo=ON `
+            -DBUILD_opencv_videoio=ON `
+            -DBUILD_opencv_highgui=OFF `
+            -DBUILD_opencv_video=OFF `
+            -DBUILD_opencv_calib3d=OFF `
+            -DBUILD_opencv_features2d=OFF `
+            -DBUILD_opencv_flann=OFF `
+            -DBUILD_opencv_objdetect=OFF `
+            -DBUILD_opencv_stitching=OFF `
+            -DBUILD_opencv_ml=OFF `
+            -DBUILD_opencv_dnn=OFF `
+            -DBUILD_opencv_gapi=OFF `
+            -DBUILD_opencv_world=OFF `
+            -DBUILD_EXAMPLES=OFF `
+            -DBUILD_TESTS=OFF `
+            -DBUILD_PERF_TESTS=OFF `
+            -DBUILD_DOCS=OFF `
+            -DBUILD_JAVA=OFF `
+            -DBUILD_opencv_python2=OFF `
+            -DBUILD_opencv_python3=OFF `
+            -DBUILD_opencv_js=OFF `
+            -DWITH_GUI=OFF `
+            -DWITH_QT=OFF `
+            -DWITH_GTK=OFF `
+            -DWITH_FFMPEG=OFF `
+            -DWITH_GSTREAMER=OFF `
+            -DWITH_DSHOW=OFF `
+            -DWITH_V4L=OFF `
+            -DWITH_OPENGL=OFF `
+            -DWITH_CUDA=OFF `
+            -DWITH_OPENCL=OFF `
+            -DWITH_IPP=OFF `
+            -DWITH_LAPACK=OFF `
+            -DWITH_EIGEN=OFF `
+            -DWITH_MSMF=ON `
+            -DWITH_MSMF_DXVA=OFF `
+            -DWITH_JPEG=ON `
+            -DWITH_PNG=ON `
+            -DWITH_WEBP=ON `
+            -DBUILD_JPEG=ON `
+            -DBUILD_PNG=ON `
+            -DBUILD_WEBP=ON `
+            -DWITH_TIFF=OFF `
+            -DWITH_JASPER=OFF `
+            -DWITH_OPENEXR=OFF `
+            -DWITH_PFM=OFF `
+            -DWITH_GDCM=OFF
+
+          cmake --build opencv-build --config Release --target install -j 4
+
+      - name: Locate OpenCVConfig.cmake
+        shell: pwsh
+        run: |
+          $cfg = Get-ChildItem -Path "${{ env.OPENCV_INSTALL_DIR }}" -Recurse -Filter "OpenCVConfig.cmake" | Select-Object -First 1
+          if (-not $cfg) { throw "OpenCVConfig.cmake not found under ${{ env.OPENCV_INSTALL_DIR }}" }
+          Write-Host "OpenCV_DIR -> $($cfg.DirectoryName)"
+          echo "OpenCV_DIR=$($cfg.DirectoryName)" >> $env:GITHUB_ENV
+
+      - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
@@ -39,21 +136,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # OPENCV_BUILD=1 di .cargo/config.toml artinya OpenCV di-build dari
-      # source lewat CMake, jadi butuh CMake + compiler C++ (sudah tersedia
-      # di image windows-latest) dan LLVM buat bindgen.
-      - name: Setup LLVM (untuk buildtime_bindgen)
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "17"
-
       - name: Install maturin
         run: pip install maturin
 
+      # Gak perlu setup LLVM/libclang lagi — buildtime_bindgen sudah dihapus
+      # dari opencv-rust sejak 0.53.0, bindings udah pre-generated di crate.
       - name: Build wheel (release, minimal build)
         run: maturin build --release --interpreter python
         env:
-          LIBCLANG_PATH: ${{ env.LLVM_PATH }}\bin
+          OPENCV_MSVC_CRT: dynamic
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
