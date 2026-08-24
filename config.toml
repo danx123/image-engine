@@ -1,0 +1,20 @@
+[env]
+# CATATAN: file ini cuma kepake buat build LOKAL di mesin lu sendiri.
+# Di CI (build.yml), OPENCV_INCLUDE_PATHS / OPENCV_LINK_PATHS /
+# OPENCV_LINK_LIBS di-set dinamis lewat GITHUB_ENV setelah OpenCV selesai
+# di-build (soalnya pathnya baru ketahuan saat runtime CI), jadi env var
+# statis di sini gak dipake sama sekali di pipeline.
+#
+# Kalau mau build image_engine di laptop sendiri, install/copy dulu hasil
+# build OpenCV (module: core, imgcodecs, imgproc, photo, videoio; dynamic;
+# BUILD_opencv_world=ON) terus samain 3 baris di bawah ini sama lokasi
+# beneran di mesin lu:
+#
+# OPENCV_INCLUDE_PATHS = "C:\\opencv-install\\include"
+# OPENCV_LINK_PATHS    = "C:\\opencv-install\\x64\\vc17\\lib"
+# OPENCV_LINK_LIBS     = "opencv_world480"
+#
+# Jangan lupa juga taruh opencv_world480.dll di PATH (atau folder yang sama
+# dengan .pyd hasil build) biar bisa jalan pas runtime.
+
+OPENCV_MSVC_CRT = "dynamic"
