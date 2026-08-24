@@ -348,7 +348,7 @@ fn numpy_to_mat(array: PyReadonlyArray3<u8>) -> PyResult<Mat> {
 /// Mat -> numpy (H, W, C) uint8. Channel 1 tetap dikembalikan sebagai (H, W, 1),
 /// di-squeeze di sisi Python kalau perlu.
 #[pyfunction]
-fn mat_to_numpy<'py>(py: Python<'py>, mat: &Mat) -> PyResult<&'py PyArray3<u8>> {
+fn mat_to_numpy<'py>(py: Python<'py>, mat: &Mat) -> PyResult<Bound<'py, PyArray3<u8>>> {
     let rows = mat.rows();
     let cols = mat.cols();
     let channels = mat.channels();
@@ -658,9 +658,9 @@ impl VideoCapture {
 
     fn __exit__(
         &mut self,
-        _exc_type: Option<&PyAny>,
-        _exc_value: Option<&PyAny>,
-        _traceback: Option<&PyAny>,
+        _exc_type: Option<Bound<'_, PyAny>>,
+        _exc_value: Option<Bound<'_, PyAny>>,
+        _traceback: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         self.release()
     }
@@ -671,7 +671,7 @@ impl VideoCapture {
 // ============================================================================
 
 #[pymodule]
-fn image_engine(_py: Python, m: &PyModule) -> PyResult<()> {
+fn image_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // --- Fungsi dasar ---
     m.add_function(wrap_pyfunction!(imread, m)?)?;
     m.add_function(wrap_pyfunction!(imwrite, m)?)?;
@@ -744,8 +744,8 @@ fn image_engine(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add("COLOR_BGRA2BGR", imgproc::COLOR_BGRA2BGR)?;
     m.add("COLOR_BGR2HSV", imgproc::COLOR_BGR2HSV)?;
     m.add("COLOR_HSV2BGR", imgproc::COLOR_HSV2BGR)?;
-    m.add("COLOR_BGR2LAB", imgproc::COLOR_BGR2LAB)?;
-    m.add("COLOR_LAB2BGR", imgproc::COLOR_LAB2BGR)?;
+    m.add("COLOR_BGR2LAB", imgproc::COLOR_BGR2Lab)?;
+    m.add("COLOR_LAB2BGR", imgproc::COLOR_Lab2BGR)?;
     m.add("COLOR_BGR2YCrCb", imgproc::COLOR_BGR2YCrCb)?;
     m.add("COLOR_YCrCb2BGR", imgproc::COLOR_YCrCb2BGR)?;
 
