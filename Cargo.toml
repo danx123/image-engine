@@ -1,0 +1,34 @@
+[package]
+name = "image_engine"
+version = "0.2.0"
+edition = "2021"
+description = "Rust-OpenCV minimal engine untuk Macan Image Viewer & Macan Efek"
+license = "MIT"
+
+[lib]
+name = "image_engine"
+crate-type = ["cdylib"]  # Bisa dipanggil langsung dari Python
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+
+# Jembatan numpy <-> opencv::Mat, dipakai supaya sisi Python (macan_efek.py)
+# tetap bisa kerja dengan np.ndarray seperti sebelumnya, tanpa cv2.
+numpy = "0.22"
+ndarray = "0.15"
+
+opencv = {
+    version = "0.90",
+    default-features = false,  # KUNCI: matikan SEMUA fitur bawaan
+    features = [
+        "opencv-480",           # Versi sama dengan opencv-python 4.8.x
+        "buildtime_bindgen",    # Generate binding saat build
+        "core",                 # Mat, Scalar, flip, addWeighted, split, merge, LUT,
+                                 # bitwise_and, hconcat, vconcat, transform, divide, add/subtract
+        "imgcodecs",            # Baca/tulis gambar: imread, imwrite
+        "imgproc",               # cvtColor, resize, rotate, blur, filter2D, colormap,
+                                 # Canny, adaptiveThreshold, equalizeHist, getGaussianKernel
+        "photo",                # Efek lanjutan: detailEnhance, edgePreservingFilter
+    ]
+}
+rayon = "1.10"  # Opsional: buat paralel kalau nanti butuh
