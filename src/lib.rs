@@ -51,7 +51,15 @@ type CvResult<T> = Result<T, EngineError>;
 // baris pertama (`let src = &src.inner;`) supaya isi body PERSIS sama
 // seperti sebelumnya — cuma signature & baris Ok(...) terakhir yang berubah.
 // ============================================================================
-#[pyclass]
+// `unsendable`: opencv::Mat membungkus raw pointer (*mut c_void) yang gak
+// Sync, jadi PyO3 gak bisa jamin PyMat aman dipakai lintas-thread secara
+// otomatis. `unsendable` bikin instance-nya cuma boleh diakses dari thread
+// Python yang bikin dia — cukup buat kasus kita karena semua fungsi di sini
+// dipanggil sinkron dari satu thread Python yang sama.
+// `skip_from_py_object`: matiin auto-derive FromPyObject-by-Clone (fitur ini
+// mulai deprecated di pyo3 baru), soalnya kita gak butuh fitur itu — PyMat
+// selalu dipakai sebagai &PyMat/&mut PyMat lewat extract bawaan #[pyclass].
+#[pyclass(unsendable, skip_from_py_object)]
 #[derive(Clone)]
 struct PyMat {
     inner: Mat,
@@ -86,7 +94,9 @@ fn imread(path: &str, flags: Option<i32>) -> CvResult<PyMat> {
 #[pyo3(signature = (path, img, params=None))]
 fn imwrite(path: &str, img: &PyMat, params: Option<Vec<i32>>) -> CvResult<bool> {
     let img = &img.inner;
-    let params = params.unwrap_or_default();
+    // imgcodecs::imwrite butuh &opencv::core::Vector<i32>, bukan &Vec<i32> —
+    // Vec biasa gak auto-convert, jadi kita bungkus eksplisit di sini.
+    let params: core::Vector<i32> = core::Vector::from(params.unwrap_or_default());
     let result = imgcodecs::imwrite(path, img, &params)?;
     Ok(result)
 }
@@ -270,7 +280,9 @@ fn lut(src: &PyMat, lut: &PyMat) -> CvResult<PyMat> {
 #[pyfunction]
 fn split(src: &PyMat) -> CvResult<Vec<PyMat>> {
     let src = &src.inner;
-    let mut mv = core::Vector::default();
+    // Compiler gak bisa nebak T di Vector<T> cuma dari `.default()` — kasih
+    // tipe eksplisit Vector<Mat>, sama kayak yang dipakai di equalize_hist().
+    let mut mv: core::Vector<Mat> = core::Vector::new();
     core::split(src, &mut mv)?;
     Ok(mv.to_vec().into_iter().map(PyMat::from).collect())
 }
@@ -716,7 +728,9 @@ fn equalize_hist(src: &PyMat) -> CvResult<PyMat> {
 // ============================================================================
 
 /// cv2.VideoCapture — buka file video, cuma dipakai baca properti (cap.get)
-#[pyclass]
+// Sama kayak PyMat: opencv::videoio::VideoCapture juga bungkus raw pointer
+// yang gak Sync, jadi perlu `unsendable`.
+#[pyclass(unsendable)]
 struct VideoCapture {
     inner: CvVideoCapture,
 }
