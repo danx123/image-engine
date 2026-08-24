@@ -20,11 +20,12 @@ ndarray = "0.15"
 opencv = {
     version = "0.90.0",
     default-features = false,  # KUNCI: matikan SEMUA fitur bawaan
-    features = [
-        "opencv-480",           # Versi sama dengan opencv-python 4.8.x        
-        "core",                 # Mat, Scalar, flip, addWeighted, split, merge, LUT,        
+    features = [        
+        "core",                 # Mat, Scalar, flip, addWeighted, split, merge, LUT,
+                                 # bitwise_and, hconcat, vconcat, transform, divide, add/subtract
         "imgcodecs",            # Baca/tulis gambar: imread, imwrite
-        "imgproc",               # cvtColor, resize, rotate, blur, filter2D, colormap,                                 
+        "imgproc",               # cvtColor, resize, rotate, blur, filter2D, colormap,
+                                 # Canny, adaptiveThreshold, equalizeHist, getGaussianKernel
         "photo",                # Efek lanjutan: detailEnhance, edgePreservingFilter
     ]
 }
