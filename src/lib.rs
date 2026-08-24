@@ -4,7 +4,64 @@ use opencv::imgcodecs;
 use opencv::imgproc;
 use opencv::prelude::*; // MatTraitConst, MatTrait, MatTraitConstManual, dll.
 use opencv::videoio::{self, VideoCapture as CvVideoCapture, VideoCaptureTrait, VideoCaptureTraitConst};
+use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+
+// ============================================================================
+// 🌉 JEMBATAN ERROR — opencv::Error dan pyo3::PyErr sama-sama tipe dari luar
+// crate ini, jadi `impl From<opencv::Error> for PyErr` dilarang orphan rule
+// (makanya `?` di fungsi ber-return PyResult<Mat> gagal compile). EngineError
+// jadi perantara LOKAL: boleh punya `From` dari kedua sisi, dan pyo3 otomatis
+// convert dia jadi PyErr lewat `impl From<EngineError> for PyErr` di bawah.
+// ============================================================================
+enum EngineError {
+    Cv(opencv::Error),
+    Py(PyErr),
+}
+
+impl From<opencv::Error> for EngineError {
+    fn from(e: opencv::Error) -> Self {
+        EngineError::Cv(e)
+    }
+}
+
+impl From<PyErr> for EngineError {
+    fn from(e: PyErr) -> Self {
+        EngineError::Py(e)
+    }
+}
+
+impl From<EngineError> for PyErr {
+    fn from(e: EngineError) -> Self {
+        match e {
+            EngineError::Cv(e) => PyRuntimeError::new_err(e.to_string()),
+            EngineError::Py(e) => e,
+        }
+    }
+}
+
+type CvResult<T> = Result<T, EngineError>;
+
+// ============================================================================
+// 🧱 PyMat — opencv::Mat BUKAN tipe PyO3 (bukan #[pyclass], gak ada
+// IntoPy/FromPyObject), jadi gak pernah bisa lewat batas Python<->Rust
+// langsung. PyMat bungkus Mat supaya bisa jadi parameter/return value
+// pyfunction. Tiap fungsi di bawah "shadow" parameternya balik ke &Mat di
+// baris pertama (`let src = &src.inner;`) supaya isi body PERSIS sama
+// seperti sebelumnya — cuma signature & baris Ok(...) terakhir yang berubah.
+// ============================================================================
+#[pyclass]
+#[derive(Clone)]
+struct PyMat {
+    inner: Mat,
+}
+
+impl From<Mat> for PyMat {
+    fn from(m: Mat) -> Self {
+        PyMat { inner: m }
+    }
+}
 
 // ============================================================================
 // 🔧 FUNGSI DASAR — SAMA PERSIS DENGAN cv2.*
@@ -12,21 +69,23 @@ use pyo3::prelude::*;
 
 /// cv2.imread() — Baca gambar dari file
 #[pyfunction]
-fn imread(path: &str, flags: Option<i32>) -> PyResult<Mat> {
+fn imread(path: &str, flags: Option<i32>) -> CvResult<PyMat> {
     let flags = flags.unwrap_or(imgcodecs::IMREAD_UNCHANGED);
     let mat = imgcodecs::imread(path, flags)?;
     if mat.empty() {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+        return Err(PyValueError::new_err(format!(
             "Gagal baca gambar: {}", path
-        )));
+        ))
+        .into());
     }
-    Ok(mat)
+    Ok(mat.into())
 }
 
 /// cv2.imwrite() — Simpan gambar ke file
 #[pyfunction]
 #[pyo3(signature = (path, img, params=None))]
-fn imwrite(path: &str, img: &Mat, params: Option<Vec<i32>>) -> PyResult<bool> {
+fn imwrite(path: &str, img: &PyMat, params: Option<Vec<i32>>) -> CvResult<bool> {
+    let img = &img.inner;
     let params = params.unwrap_or_default();
     let result = imgcodecs::imwrite(path, img, &params)?;
     Ok(result)
@@ -35,22 +94,24 @@ fn imwrite(path: &str, img: &Mat, params: Option<Vec<i32>>) -> PyResult<bool> {
 /// cv2.cvtColor() — Ubah ruang warna
 #[pyfunction]
 #[pyo3(signature = (src, code, dst_cn=0))]
-fn cvt_color(src: &Mat, code: i32, dst_cn: i32) -> PyResult<Mat> {
+fn cvt_color(src: &PyMat, code: i32, dst_cn: i32) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     imgproc::cvt_color(src, &mut dst, code, dst_cn)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.resize() — Ubah ukuran gambar
 #[pyfunction]
 #[pyo3(signature = (src, dsize=None, fx=0.0, fy=0.0, interpolation=None))]
 fn resize(
-    src: &Mat,
+    src: &PyMat,
     dsize: Option<(i32, i32)>,
     fx: f64,
     fy: f64,
     interpolation: Option<i32>,
-) -> PyResult<Mat> {
+) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     let dsize = match dsize {
         Some((w, h)) => core::Size::new(w, h),
@@ -58,45 +119,49 @@ fn resize(
     };
     let interpolation = interpolation.unwrap_or(imgproc::INTER_LINEAR);
     imgproc::resize(src, &mut dst, dsize, fx, fy, interpolation)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.rotate() — Putar gambar 90/180 derajat
 #[pyfunction]
-fn rotate(src: &Mat, rotate_code: i32) -> PyResult<Mat> {
+fn rotate(src: &PyMat, rotate_code: i32) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     core::rotate(src, &mut dst, rotate_code)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.flip() — Balik gambar (horizontal/vertikal/keduanya)
 #[pyfunction]
-fn flip(src: &Mat, flip_code: i32) -> PyResult<Mat> {
+fn flip(src: &PyMat, flip_code: i32) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     core::flip(src, &mut dst, flip_code)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.addWeighted() — Campur dua gambar dengan bobot
 #[pyfunction]
 #[pyo3(signature = (src1, alpha, src2, beta, gamma, dst=None))]
 fn add_weighted(
-    src1: &Mat,
+    src1: &PyMat,
     alpha: f64,
-    src2: &Mat,
+    src2: &PyMat,
     beta: f64,
     gamma: f64,
-    dst: Option<&mut Mat>,
-) -> PyResult<Mat> {
+    dst: Option<&mut PyMat>,
+) -> CvResult<PyMat> {
+    let src1 = &src1.inner;
+    let src2 = &src2.inner;
     match dst {
         Some(d) => {
-            core::add_weighted(src1, alpha, src2, beta, gamma, d, -1)?;
-            Ok(d.clone())
+            core::add_weighted(src1, alpha, src2, beta, gamma, &mut d.inner, -1)?;
+            Ok(d.inner.clone().into())
         }
         None => {
             let mut d = Mat::default();
             core::add_weighted(src1, alpha, src2, beta, gamma, &mut d, -1)?;
-            Ok(d)
+            Ok(d.into())
         }
     }
 }
@@ -109,30 +174,33 @@ fn add_weighted(
 #[pyfunction]
 #[pyo3(signature = (src, ksize, sigma_x, sigma_y=0.0, border_type=None))]
 fn gaussian_blur(
-    src: &Mat,
+    src: &PyMat,
     ksize: (i32, i32),
     sigma_x: f64,
     sigma_y: f64,
     border_type: Option<i32>,
-) -> PyResult<Mat> {
+) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     let ksize = core::Size::new(ksize.0, ksize.1);
     let border_type = border_type.unwrap_or(core::BORDER_DEFAULT);
     imgproc::gaussian_blur(src, &mut dst, ksize, sigma_x, sigma_y, border_type)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.filter2D() — Pakai kernel kustom (sharpen, emboss, dll)
 #[pyfunction]
 #[pyo3(signature = (src, ddepth, kernel, anchor=None, delta=0.0, border_type=None))]
 fn filter_2d(
-    src: &Mat,
+    src: &PyMat,
     ddepth: i32,
-    kernel: &Mat,
+    kernel: &PyMat,
     anchor: Option<(i32, i32)>,
     delta: f64,
     border_type: Option<i32>,
-) -> PyResult<Mat> {
+) -> CvResult<PyMat> {
+    let src = &src.inner;
+    let kernel = &kernel.inner;
     let mut dst = Mat::default();
     let anchor = match anchor {
         Some((x, y)) => core::Point::new(x, y),
@@ -140,174 +208,193 @@ fn filter_2d(
     };
     let border_type = border_type.unwrap_or(core::BORDER_DEFAULT);
     imgproc::filter_2d(src, &mut dst, ddepth, kernel, anchor, delta, border_type)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.bilateralFilter() — Blur tapi tetap tajam di tepi
 #[pyfunction]
 #[pyo3(signature = (src, d, sigma_color, sigma_space, border_type=None))]
 fn bilateral_filter(
-    src: &Mat,
+    src: &PyMat,
     d: i32,
     sigma_color: f64,
     sigma_space: f64,
     border_type: Option<i32>,
-) -> PyResult<Mat> {
+) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     let border_type = border_type.unwrap_or(core::BORDER_DEFAULT);
     imgproc::bilateral_filter(src, &mut dst, d, sigma_color, sigma_space, border_type)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.medianBlur()
 #[pyfunction]
-fn median_blur(src: &Mat, ksize: i32) -> PyResult<Mat> {
+fn median_blur(src: &PyMat, ksize: i32) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     imgproc::median_blur(src, &mut dst, ksize)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.applyColorMap() — Buat efek warna keren
 #[pyfunction]
-fn apply_color_map(src: &Mat, colormap: i32) -> PyResult<Mat> {
+fn apply_color_map(src: &PyMat, colormap: i32) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     imgproc::apply_color_map(src, &mut dst, colormap)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.convertScaleAbs() — Atur brightness/contrast
 #[pyfunction]
 #[pyo3(signature = (src, alpha=1.0, beta=0.0))]
-fn convert_scale_abs(src: &Mat, alpha: f64, beta: f64) -> PyResult<Mat> {
+fn convert_scale_abs(src: &PyMat, alpha: f64, beta: f64) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     core::convert_scale_abs(src, &mut dst, alpha, beta)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.LUT() — Lookup table (buat gamma correction, posterize, dll)
 #[pyfunction]
-fn lut(src: &Mat, lut: &Mat) -> PyResult<Mat> {
+fn lut(src: &PyMat, lut: &PyMat) -> CvResult<PyMat> {
+    let src = &src.inner;
+    let lut = &lut.inner;
     let mut dst = Mat::default();
     core::lut(src, lut, &mut dst)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.split() — Pisah channel BGR(A)
 #[pyfunction]
-fn split(src: &Mat) -> PyResult<Vec<Mat>> {
+fn split(src: &PyMat) -> CvResult<Vec<PyMat>> {
+    let src = &src.inner;
     let mut mv = core::Vector::default();
     core::split(src, &mut mv)?;
-    Ok(mv.to_vec())
+    Ok(mv.to_vec().into_iter().map(PyMat::from).collect())
 }
 
 /// cv2.merge() — Gabung channel jadi satu gambar
 #[pyfunction]
-fn merge(mv: Vec<&Mat>) -> PyResult<Mat> {
-    let vec = core::Vector::from_iter(mv.into_iter().cloned());
+fn merge(mv: Vec<&PyMat>) -> CvResult<PyMat> {
+    let vec = core::Vector::from_iter(mv.iter().map(|m| m.inner.clone()));
     let mut dst = Mat::default();
     core::merge(&vec, &mut dst)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.bitwise_not() — Invert warna
 #[pyfunction]
-fn bitwise_not(src: &Mat) -> PyResult<Mat> {
+fn bitwise_not(src: &PyMat) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     core::bitwise_not(src, &mut dst, &core::no_array())?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.bitwise_and() — dipakai buat masking (mis. efek cartoon)
 #[pyfunction]
 #[pyo3(signature = (src1, src2, mask=None))]
-fn bitwise_and(src1: &Mat, src2: &Mat, mask: Option<&Mat>) -> PyResult<Mat> {
+fn bitwise_and(src1: &PyMat, src2: &PyMat, mask: Option<&PyMat>) -> CvResult<PyMat> {
+    let src1 = &src1.inner;
+    let src2 = &src2.inner;
+    let mask = mask.map(|m| &m.inner);
     let mut dst = Mat::default();
     match mask {
         Some(m) => core::bitwise_and(src1, src2, &mut dst, m)?,
         None => core::bitwise_and(src1, src2, &mut dst, &core::no_array())?,
     }
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.add() dengan skalar (mis. cv2.add(channel, 25)) — otomatis saturate 0-255
 #[pyfunction]
-fn add_scalar(src: &Mat, value: f64) -> PyResult<Mat> {
+fn add_scalar(src: &PyMat, value: f64) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     core::add(src, &Scalar::all(value), &mut dst, &core::no_array(), -1)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.subtract() dengan skalar — otomatis saturate 0-255
 #[pyfunction]
-fn subtract_scalar(src: &Mat, value: f64) -> PyResult<Mat> {
+fn subtract_scalar(src: &PyMat, value: f64) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     core::subtract(src, &Scalar::all(value), &mut dst, &core::no_array(), -1)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.divide() — dipakai buat pencil sketch (color dodge)
 #[pyfunction]
 #[pyo3(signature = (src1, src2, scale=1.0))]
-fn divide(src1: &Mat, src2: &Mat, scale: f64) -> PyResult<Mat> {
+fn divide(src1: &PyMat, src2: &PyMat, scale: f64) -> CvResult<PyMat> {
+    let src1 = &src1.inner;
+    let src2 = &src2.inner;
     let mut dst = Mat::default();
     core::divide2(src1, src2, &mut dst, scale, -1)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.transform() — dipakai buat efek sepia (kali matriks warna 3x3)
 #[pyfunction]
-fn transform(src: &Mat, m: &Mat) -> PyResult<Mat> {
+fn transform(src: &PyMat, m: &PyMat) -> CvResult<PyMat> {
+    let src = &src.inner;
+    let m = &m.inner;
     let mut dst = Mat::default();
     core::transform(src, &mut dst, m)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.hconcat() — gabung gambar secara horizontal (collage)
 #[pyfunction]
-fn hconcat(mats: Vec<&Mat>) -> PyResult<Mat> {
-    let vec = core::Vector::from_iter(mats.into_iter().cloned());
+fn hconcat(mats: Vec<&PyMat>) -> CvResult<PyMat> {
+    let vec = core::Vector::from_iter(mats.iter().map(|m| m.inner.clone()));
     let mut dst = Mat::default();
     core::hconcat(&vec, &mut dst)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.vconcat() — gabung gambar secara vertikal (collage)
 #[pyfunction]
-fn vconcat(mats: Vec<&Mat>) -> PyResult<Mat> {
-    let vec = core::Vector::from_iter(mats.into_iter().cloned());
+fn vconcat(mats: Vec<&PyMat>) -> CvResult<PyMat> {
+    let vec = core::Vector::from_iter(mats.iter().map(|m| m.inner.clone()));
     let mut dst = Mat::default();
     core::vconcat(&vec, &mut dst)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.Canny() — deteksi tepi
 #[pyfunction]
 #[pyo3(signature = (src, threshold1, threshold2, aperture_size=3, l2gradient=false))]
 fn canny(
-    src: &Mat,
+    src: &PyMat,
     threshold1: f64,
     threshold2: f64,
     aperture_size: i32,
     l2gradient: bool,
-) -> PyResult<Mat> {
+) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     imgproc::canny(src, &mut dst, threshold1, threshold2, aperture_size, l2gradient)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// cv2.adaptiveThreshold() — dipakai buat garis tepi efek cartoon
 #[pyfunction]
 fn adaptive_threshold(
-    src: &Mat,
+    src: &PyMat,
     max_value: f64,
     adaptive_method: i32,
     threshold_type: i32,
     block_size: i32,
     c: f64,
-) -> PyResult<Mat> {
+) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     imgproc::adaptive_threshold(src, &mut dst, max_value, adaptive_method, threshold_type, block_size, c)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 // ============================================================================
@@ -318,7 +405,7 @@ fn adaptive_threshold(
 
 /// numpy (H, W, C) uint8 -> Mat. Array WAJIB contiguous (np.ascontiguousarray).
 #[pyfunction]
-fn numpy_to_mat(array: PyReadonlyArray3<u8>) -> PyResult<Mat> {
+fn numpy_to_mat(array: PyReadonlyArray3<u8>) -> CvResult<PyMat> {
     let arr = array.as_array();
     let shape = arr.shape();
     let (h, w, c) = (shape[0] as i32, shape[1] as i32, shape[2] as i32);
@@ -327,13 +414,14 @@ fn numpy_to_mat(array: PyReadonlyArray3<u8>) -> PyResult<Mat> {
         3 => CV_8UC3,
         4 => CV_8UC4,
         _ => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
+            return Err(PyValueError::new_err(
                 "numpy_to_mat hanya mendukung array dengan 1, 3, atau 4 channel",
-            ))
+            )
+            .into())
         }
     };
     let data = arr.as_slice().ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err(
+        PyValueError::new_err(
             "Array harus contiguous — bungkus dengan np.ascontiguousarray() dulu",
         )
     })?;
@@ -342,13 +430,14 @@ fn numpy_to_mat(array: PyReadonlyArray3<u8>) -> PyResult<Mat> {
     };
     // Clone supaya Mat memegang datanya sendiri — buffer numpy asal bisa
     // didealokasi/berubah kapan saja dari sisi Python.
-    Ok(mat.try_clone()?)
+    Ok(mat.try_clone()?.into())
 }
 
 /// Mat -> numpy (H, W, C) uint8. Channel 1 tetap dikembalikan sebagai (H, W, 1),
 /// di-squeeze di sisi Python kalau perlu.
 #[pyfunction]
-fn mat_to_numpy<'py>(py: Python<'py>, mat: &Mat) -> PyResult<&'py PyArray3<u8>> {
+fn mat_to_numpy<'py>(py: Python<'py>, mat: &PyMat) -> CvResult<Bound<'py, PyArray3<u8>>> {
+    let mat = &mat.inner;
     let rows = mat.rows();
     let cols = mat.cols();
     let channels = mat.channels();
@@ -357,7 +446,7 @@ fn mat_to_numpy<'py>(py: Python<'py>, mat: &Mat) -> PyResult<&'py PyArray3<u8>> 
         (rows as usize, cols as usize, channels as usize),
         bytes.to_vec(),
     )
-    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    .map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(arr.into_pyarray(py))
 }
 
@@ -367,7 +456,8 @@ fn mat_to_numpy<'py>(py: Python<'py>, mat: &Mat) -> PyResult<&'py PyArray3<u8>> 
 
 /// Grayscale yang otomatis aware BGR/BGRA (dulunya image_proc_rust.manual_grayscale)
 #[pyfunction]
-fn manual_grayscale(src: &Mat) -> PyResult<Mat> {
+fn manual_grayscale(src: &PyMat) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     if src.channels() == 4 {
         let mut bgr = Mat::default();
@@ -376,13 +466,14 @@ fn manual_grayscale(src: &Mat) -> PyResult<Mat> {
     } else {
         imgproc::cvt_color(src, &mut dst, imgproc::COLOR_BGR2GRAY, 0)?;
     }
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// Efek sepia, alpha channel (kalau ada) tetap dipertahankan
 /// (dulunya image_proc_rust.apply_sepia)
 #[pyfunction]
-fn apply_sepia(src: &Mat) -> PyResult<Mat> {
+fn apply_sepia(src: &PyMat) -> CvResult<PyMat> {
+    let src = &src.inner;
     let kernel = Mat::from_slice_2d(&[
         &[0.272f32, 0.534, 0.131],
         &[0.349, 0.686, 0.168],
@@ -405,19 +496,20 @@ fn apply_sepia(src: &Mat) -> PyResult<Mat> {
 
         let mut out = Mat::default();
         core::merge(&sepia_channels, &mut out)?;
-        Ok(out)
+        Ok(out.into())
     } else {
         let mut sepia = Mat::default();
         core::transform(src, &mut sepia, &kernel)?;
-        Ok(sepia)
+        Ok(sepia.into())
     }
 }
 
 /// Gamma correction lewat LUT (dulunya dihitung manual di Python)
 #[pyfunction]
-fn adjust_gamma(src: &Mat, gamma: f64) -> PyResult<Mat> {
+fn adjust_gamma(src: &PyMat, gamma: f64) -> CvResult<PyMat> {
+    let src = &src.inner;
     if gamma <= 0.0 || (gamma - 1.0).abs() < 1e-6 {
-        return Ok(src.try_clone()?);
+        return Ok(src.try_clone()?.into());
     }
     let inv_gamma = 1.0 / gamma;
     let mut table_vals = [0u8; 256];
@@ -428,21 +520,23 @@ fn adjust_gamma(src: &Mat, gamma: f64) -> PyResult<Mat> {
     let table = Mat::from_slice(&table_vals)?;
     let mut dst = Mat::default();
     core::lut(src, &table, &mut dst)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// Brightness + contrast dalam satu panggilan (convertScaleAbs)
 #[pyfunction]
 #[pyo3(signature = (src, brightness=0.0, contrast=1.0))]
-fn adjust_brightness_contrast(src: &Mat, brightness: f64, contrast: f64) -> PyResult<Mat> {
+fn adjust_brightness_contrast(src: &PyMat, brightness: f64, contrast: f64) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     core::convert_scale_abs(src, &mut dst, contrast, brightness)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// Saturasi lewat HSV (split S, skala, merge lagi)
 #[pyfunction]
-fn adjust_saturation(src: &Mat, factor: f64) -> PyResult<Mat> {
+fn adjust_saturation(src: &PyMat, factor: f64) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut hsv = Mat::default();
     imgproc::cvt_color(src, &mut hsv, imgproc::COLOR_BGR2HSV, 0)?;
 
@@ -457,12 +551,13 @@ fn adjust_saturation(src: &Mat, factor: f64) -> PyResult<Mat> {
     core::merge(&channels, &mut merged)?;
     let mut dst = Mat::default();
     imgproc::cvt_color(&merged, &mut dst, imgproc::COLOR_HSV2BGR, 0)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// Geser Hue (0-179 di OpenCV 8-bit HSV)
 #[pyfunction]
-fn adjust_hue(src: &Mat, shift: i32) -> PyResult<Mat> {
+fn adjust_hue(src: &PyMat, shift: i32) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut hsv = Mat::default();
     imgproc::cvt_color(src, &mut hsv, imgproc::COLOR_BGR2HSV, 0)?;
 
@@ -477,12 +572,13 @@ fn adjust_hue(src: &Mat, shift: i32) -> PyResult<Mat> {
     core::merge(&channels, &mut merged)?;
     let mut dst = Mat::default();
     imgproc::cvt_color(&merged, &mut dst, imgproc::COLOR_HSV2BGR, 0)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// Geser channel R/G/B satu-satu, masing-masing -100..100 (auto-saturate)
 #[pyfunction]
-fn adjust_channel_mixer(src: &Mat, r_shift: f64, g_shift: f64, b_shift: f64) -> PyResult<Mat> {
+fn adjust_channel_mixer(src: &PyMat, r_shift: f64, g_shift: f64, b_shift: f64) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut channels = core::Vector::<Mat>::new();
     core::split(src, &mut channels)?;
 
@@ -516,14 +612,15 @@ fn adjust_channel_mixer(src: &Mat, r_shift: f64, g_shift: f64, b_shift: f64) -> 
 
     let mut dst = Mat::default();
     core::merge(&merged_vec, &mut dst)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// Vignette (gelap di pinggir). Catatan: hanya menggelapkan 3 channel pertama
 /// (B, G, R) — kalau input BGRA, alpha tidak diubah.
 #[pyfunction]
 #[pyo3(signature = (src, sigma=200.0))]
-fn apply_vignette(src: &Mat, sigma: f64) -> PyResult<Mat> {
+fn apply_vignette(src: &PyMat, sigma: f64) -> CvResult<PyMat> {
+    let src = &src.inner;
     let rows = src.rows();
     let cols = src.cols();
 
@@ -558,12 +655,13 @@ fn apply_vignette(src: &Mat, sigma: f64) -> PyResult<Mat> {
             }
         }
     }
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// Sharpen dengan kernel 3x3 standar [[-1,-1,-1],[-1,9,-1],[-1,-1,-1]]
 #[pyfunction]
-fn apply_sharpen(src: &Mat) -> PyResult<Mat> {
+fn apply_sharpen(src: &PyMat) -> CvResult<PyMat> {
+    let src = &src.inner;
     let kernel = Mat::from_slice_2d(&[
         &[-1f32, -1.0, -1.0],
         &[-1.0, 9.0, -1.0],
@@ -571,26 +669,28 @@ fn apply_sharpen(src: &Mat) -> PyResult<Mat> {
     ])?;
     let mut dst = Mat::default();
     imgproc::filter_2d(src, &mut dst, -1, &kernel, core::Point::new(-1, -1), 0.0, core::BORDER_DEFAULT)?;
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// Unsharp mask (sharpen berbasis Gaussian blur, lebih halus dari filter2D biasa)
 #[pyfunction]
 #[pyo3(signature = (src, amount=1.0, radius=5, threshold=0))]
-fn apply_unsharp_mask(src: &Mat, amount: f64, radius: i32, threshold: i32) -> PyResult<Mat> {
+fn apply_unsharp_mask(src: &PyMat, amount: f64, radius: i32, threshold: i32) -> CvResult<PyMat> {
+    let src = &src.inner;
     let k = if radius % 2 == 0 { radius + 1 } else { radius }.max(1);
     let mut blurred = Mat::default();
     imgproc::gaussian_blur(src, &mut blurred, core::Size::new(k, k), 0.0, 0.0, core::BORDER_DEFAULT)?;
     let mut dst = Mat::default();
     core::add_weighted(src, 1.0 + amount, &blurred, -amount, 0.0, &mut dst, -1)?;
     let _ = threshold; // reserved: bisa dipakai buat masking area low-contrast nanti
-    Ok(dst)
+    Ok(dst.into())
 }
 
 /// Equalize histogram — kalau gambar berwarna, disamakan lewat channel Y (YCrCb)
 /// biar warnanya tidak rusak.
 #[pyfunction]
-fn equalize_hist(src: &Mat) -> PyResult<Mat> {
+fn equalize_hist(src: &PyMat) -> CvResult<PyMat> {
+    let src = &src.inner;
     let mut dst = Mat::default();
     if src.channels() == 1 {
         imgproc::equalize_hist(src, &mut dst)?;
@@ -606,7 +706,7 @@ fn equalize_hist(src: &Mat) -> PyResult<Mat> {
         core::merge(&ch, &mut merged)?;
         imgproc::cvt_color(&merged, &mut dst, imgproc::COLOR_YCrCb2BGR, 0)?;
     }
-    Ok(dst)
+    Ok(dst.into())
 }
 
 // ============================================================================
@@ -625,28 +725,28 @@ struct VideoCapture {
 impl VideoCapture {
     /// VideoCapture(path) — otomatis pilih backend terbaik yang tersedia (CAP_ANY)
     #[new]
-    fn new(path: &str) -> PyResult<Self> {
+    fn new(path: &str) -> CvResult<Self> {
         let inner = CvVideoCapture::from_file(path, videoio::CAP_ANY)?;
         Ok(Self { inner })
     }
 
     /// cap.isOpened()
-    fn is_opened(&self) -> PyResult<bool> {
+    fn is_opened(&self) -> CvResult<bool> {
         Ok(self.inner.is_opened()?)
     }
 
     /// cap.get(prop_id) — pakai konstanta CAP_PROP_* di bawah
-    fn get(&self, prop_id: i32) -> PyResult<f64> {
+    fn get(&self, prop_id: i32) -> CvResult<f64> {
         Ok(self.inner.get(prop_id)?)
     }
 
     /// cap.set(prop_id, value) — jarang dipakai buat baca metadata, tapi disediakan biar lengkap
-    fn set(&mut self, prop_id: i32, value: f64) -> PyResult<bool> {
+    fn set(&mut self, prop_id: i32, value: f64) -> CvResult<bool> {
         Ok(self.inner.set(prop_id, value)?)
     }
 
     /// cap.release()
-    fn release(&mut self) -> PyResult<()> {
+    fn release(&mut self) -> CvResult<()> {
         self.inner.release()?;
         Ok(())
     }
@@ -658,10 +758,10 @@ impl VideoCapture {
 
     fn __exit__(
         &mut self,
-        _exc_type: Option<&PyAny>,
-        _exc_value: Option<&PyAny>,
-        _traceback: Option<&PyAny>,
-    ) -> PyResult<()> {
+        _exc_type: Option<Bound<'_, PyAny>>,
+        _exc_value: Option<Bound<'_, PyAny>>,
+        _traceback: Option<Bound<'_, PyAny>>,
+    ) -> CvResult<()> {
         self.release()
     }
 }
@@ -671,7 +771,10 @@ impl VideoCapture {
 // ============================================================================
 
 #[pymodule]
-fn image_engine(_py: Python, m: &PyModule) -> PyResult<()> {
+fn image_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // --- Tipe ---
+    m.add_class::<PyMat>()?;
+
     // --- Fungsi dasar ---
     m.add_function(wrap_pyfunction!(imread, m)?)?;
     m.add_function(wrap_pyfunction!(imwrite, m)?)?;
@@ -744,8 +847,8 @@ fn image_engine(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add("COLOR_BGRA2BGR", imgproc::COLOR_BGRA2BGR)?;
     m.add("COLOR_BGR2HSV", imgproc::COLOR_BGR2HSV)?;
     m.add("COLOR_HSV2BGR", imgproc::COLOR_HSV2BGR)?;
-    m.add("COLOR_BGR2LAB", imgproc::COLOR_BGR2LAB)?;
-    m.add("COLOR_LAB2BGR", imgproc::COLOR_LAB2BGR)?;
+    m.add("COLOR_BGR2LAB", imgproc::COLOR_BGR2Lab)?;
+    m.add("COLOR_LAB2BGR", imgproc::COLOR_Lab2BGR)?;
     m.add("COLOR_BGR2YCrCb", imgproc::COLOR_BGR2YCrCb)?;
     m.add("COLOR_YCrCb2BGR", imgproc::COLOR_YCrCb2BGR)?;
 
