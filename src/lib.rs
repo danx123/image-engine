@@ -1,4 +1,14 @@
 use numpy::{IntoPyArray, PyArray3, PyReadonlyArray3};
+// PENTING: pakai `numpy::ndarray` (re-export), JANGAN nambah dependency
+// `ndarray` sendiri di Cargo.toml. Alasannya: crate `numpy` mendukung
+// rentang versi ndarray yang semver-incompatible (0.15–0.17), dan kalau kita
+// juga declare `ndarray` sendiri di Cargo.toml, Cargo bisa resolve DUA
+// instance ndarray yang berbeda versi major-nya. Akibatnya `Array3<u8>` yang
+// kita bikin jadi tipe yang beda secara teknis dari `ArrayBase` yang dipakai
+// trait `IntoPyArray` di dalam numpy — makanya muncul error "no method named
+// `into_pyarray` found". Dengan selalu pakai `numpy::ndarray::Array3`,
+// versinya dijamin sama-sama satu instance dengan yang dipakai numpy.
+use numpy::ndarray::Array3;
 use opencv::core::{self, Mat, Scalar, CV_8UC1, CV_8UC3, CV_8UC4};
 use opencv::imgcodecs;
 use opencv::imgproc;
@@ -56,10 +66,12 @@ type CvResult<T> = Result<T, EngineError>;
 // otomatis. `unsendable` bikin instance-nya cuma boleh diakses dari thread
 // Python yang bikin dia — cukup buat kasus kita karena semua fungsi di sini
 // dipanggil sinkron dari satu thread Python yang sama.
-// `skip_from_py_object`: matiin auto-derive FromPyObject-by-Clone (fitur ini
-// mulai deprecated di pyo3 baru), soalnya kita gak butuh fitur itu — PyMat
-// selalu dipakai sebagai &PyMat/&mut PyMat lewat extract bawaan #[pyclass].
-#[pyclass(unsendable, skip_from_py_object)]
+// `from_py_object`: PyMat derive Clone, dan pyo3 baru bikin auto-derive
+// FromPyObject-lewat-Clone jadi opt-in. Kita PAKAI opsi ini (bukan
+// skip_from_py_object) karena merge()/hconcat()/vconcat() di bawah nerima
+// `Vec<PyMat>` sebagai argumen Python — itu butuh PyMat: FromPyObject biar
+// tiap elemen list Python bisa di-extract (clone) jadi PyMat.
+#[pyclass(unsendable, from_py_object)]
 #[derive(Clone)]
 struct PyMat {
     inner: Mat,
@@ -289,8 +301,11 @@ fn split(src: &PyMat) -> CvResult<Vec<PyMat>> {
 
 /// cv2.merge() — Gabung channel jadi satu gambar
 #[pyfunction]
-fn merge(mv: Vec<&PyMat>) -> CvResult<PyMat> {
-    let vec = core::Vector::from_iter(mv.iter().map(|m| m.inner.clone()));
+fn merge(mv: Vec<PyMat>) -> CvResult<PyMat> {
+    // Vec<&PyMat> gak bisa lagi jadi argumen #[pyfunction] langsung di pyo3
+    // versi baru (perlu FromPyObject utuh, bukan reference) — jadi diterima
+    // sebagai Vec<PyMat> (masing-masing di-clone pas extract dari Python).
+    let vec: core::Vector<Mat> = core::Vector::from_iter(mv.iter().map(|m| m.inner.clone()));
     let mut dst = Mat::default();
     core::merge(&vec, &mut dst)?;
     Ok(dst.into())
@@ -361,8 +376,8 @@ fn transform(src: &PyMat, m: &PyMat) -> CvResult<PyMat> {
 
 /// cv2.hconcat() — gabung gambar secara horizontal (collage)
 #[pyfunction]
-fn hconcat(mats: Vec<&PyMat>) -> CvResult<PyMat> {
-    let vec = core::Vector::from_iter(mats.iter().map(|m| m.inner.clone()));
+fn hconcat(mats: Vec<PyMat>) -> CvResult<PyMat> {
+    let vec: core::Vector<Mat> = core::Vector::from_iter(mats.iter().map(|m| m.inner.clone()));
     let mut dst = Mat::default();
     core::hconcat(&vec, &mut dst)?;
     Ok(dst.into())
@@ -370,8 +385,8 @@ fn hconcat(mats: Vec<&PyMat>) -> CvResult<PyMat> {
 
 /// cv2.vconcat() — gabung gambar secara vertikal (collage)
 #[pyfunction]
-fn vconcat(mats: Vec<&PyMat>) -> CvResult<PyMat> {
-    let vec = core::Vector::from_iter(mats.iter().map(|m| m.inner.clone()));
+fn vconcat(mats: Vec<PyMat>) -> CvResult<PyMat> {
+    let vec: core::Vector<Mat> = core::Vector::from_iter(mats.iter().map(|m| m.inner.clone()));
     let mut dst = Mat::default();
     core::vconcat(&vec, &mut dst)?;
     Ok(dst.into())
@@ -454,7 +469,7 @@ fn mat_to_numpy<'py>(py: Python<'py>, mat: &PyMat) -> CvResult<Bound<'py, PyArra
     let cols = mat.cols();
     let channels = mat.channels();
     let bytes = mat.data_bytes()?;
-    let arr = ndarray::Array3::from_shape_vec(
+    let arr = Array3::from_shape_vec(
         (rows as usize, cols as usize, channels as usize),
         bytes.to_vec(),
     )
