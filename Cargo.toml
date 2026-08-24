@@ -10,12 +10,17 @@ name = "image_engine"
 crate-type = ["cdylib"]  # Bisa dipanggil langsung dari Python
 
 [dependencies]
-pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
 
 # Jembatan numpy <-> opencv::Mat, dipakai supaya sisi Python (macan_efek.py)
 # tetap bisa kerja dengan np.ndarray seperti sebelumnya, tanpa cv2.
-numpy = "0.29"
-ndarray = "0.15"
+numpy = "0.22"
+# CATATAN: sengaja TIDAK nambah `ndarray = "..."` sendiri di sini.
+# Crate `numpy` mendukung rentang ndarray yang semver-incompatible
+# (0.15–0.17), jadi kalau kita ikut declare ndarray sendiri, Cargo bisa
+# resolve dua instance ndarray beda versi major sekaligus — bikin tipe
+# Array3 kita gak "cocok" lagi sama trait IntoPyArray milik numpy (lihat
+# lib.rs, pakai `numpy::ndarray::Array3` bukan `ndarray::Array3` langsung).
 
 # CATATAN PENTING (opencv-rust >= 0.53.0):
 # - "core" BUKAN feature. Modul core selalu wajib ikut, gak bisa di-toggle,
