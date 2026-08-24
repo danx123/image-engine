@@ -1,0 +1,80 @@
+name: Build image_engine
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build-windows:
+    name: Build wheel (Windows x64)
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo & OpenCV build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # OPENCV_BUILD=1 di .cargo/config.toml artinya OpenCV di-build dari
+      # source lewat CMake, jadi butuh CMake + compiler C++ (sudah tersedia
+      # di image windows-latest) dan LLVM buat bindgen.
+      - name: Setup LLVM (untuk buildtime_bindgen)
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "17"
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build wheel (release, minimal build)
+        run: maturin build --release --interpreter python
+        env:
+          LIBCLANG_PATH: ${{ env.LLVM_PATH }}\bin
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image_engine-windows-py${{ matrix.python-version }}
+          path: target/wheels/*.whl
+          if-no-files-found: error
+
+  release:
+    name: Attach wheels to release
+    needs: build-windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download wheel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image_engine-windows-py3.13
+          path: dist
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.whl
