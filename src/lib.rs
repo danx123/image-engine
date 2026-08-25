@@ -475,7 +475,7 @@ fn mat_to_numpy<'py>(py: Python<'py>, mat: &PyMat) -> CvResult<Bound<'py, PyArra
         bytes.to_vec(),
     )
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(arr.into_pyarray(py))
+    Ok(arr.into_pyarray_bound(py))
 }
 
 // ============================================================================
