@@ -115,7 +115,7 @@ jobs:
             -DWITH_V4L=OFF `
             -DWITH_OPENGL=OFF `
             -DWITH_CUDA=OFF `
-            -DWITH_OPENCL=OFF `
+            -DWITH_OPENCL=ON `
             -DWITH_IPP=OFF `
             -DWITH_LAPACK=OFF `
             -DWITH_EIGEN=OFF `
