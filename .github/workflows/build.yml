@@ -199,16 +199,16 @@ jobs:
       # .so ekstensi kita nemu dia pas runtime di mesin user (yang gak
       # install OpenCV sendiri). auditwheel itu equivalent delvewheel buat
       # Linux — otomatis bundle .so dependency + patch RPATH.
-      # CATATAN: `--plat linux_x86_64` dipakai (bukan manylinux_x_y) karena
-      # ini bukan build buat rilis publik lintas-distro di PyPI — cukup buat
-      # dipakai di sistem yang mirip sama runner ini. Kalau nanti mau
-      # portable ke banyak distro Linux, ini perlu dibuild di dalam image
-      # Docker manylinux, bukan langsung di ubuntu-latest.
+      # CATATAN: `--plat auto` (BUKAN "linux_x86_64" — versi auditwheel baru
+      # udah gak nerima itu, cuma nerima tag manylinux_* yang valid atau
+      # "auto"). Dengan "auto", auditwheel sendiri yang deteksi tag
+      # manylinux paling ketat yang cocok sama symbol glibc yang beneran
+      # kepake pas link, gak perlu nebak versi manual.
       - name: Repair wheel (bundle libopencv_world.so)
         run: |
           mkdir -p dist-repaired
           wheel=$(ls target/wheels/*.whl | head -n1)
-          auditwheel repair "$wheel" --plat linux_x86_64 --wheel-dir dist-repaired
+          auditwheel repair "$wheel" --plat auto --wheel-dir dist-repaired
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
