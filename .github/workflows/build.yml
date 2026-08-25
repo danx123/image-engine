@@ -34,6 +34,22 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # PENTING: ini beda dari Windows. Di Windows runner, libclang udah
+      # ke-bundle bareng Visual Studio jadi opencv-rust nemu dia otomatis.
+      # Di Ubuntu, `clang-sys` (dependency internal opencv-rust, dipakai buat
+      # deteksi environment/ABI biar bindings pre-generated yang dipilih
+      # cocok — BUKAN buat generate ulang bindings, jadi bukan
+      # "buildtime_bindgen" yang katanya udah dihapus) tetap butuh
+      # `libclang.so` beneran ada di sistem. Runner ubuntu-latest gak selalu
+      # punya `libclang-dev` ter-install, makanya build gagal di step maturin
+      # (bukan step build OpenCV) — makanya step ini HARUS unconditional,
+      # jalan tiap run, gak boleh digantung ke cache-opencv kayak step apt
+      # di bawah, karena tetep dibutuhin walau cache OpenCV lagi hit.
+      - name: Install libclang (buat opencv-rust punya clang-sys)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev clang
+
       # Cache pip (maturin, auditwheel, patchelf) — kecil, tapi gratisan.
       - name: Cache pip
         uses: actions/cache@v4
