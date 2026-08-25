@@ -10,7 +10,7 @@ name = "image_engine"
 crate-type = ["cdylib"]  # Bisa dipanggil langsung dari Python
 
 [dependencies]
-pyo3 = { version = "0.21", features = ["extension-module"] }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
 
 # Jembatan numpy <-> opencv::Mat, dipakai supaya sisi Python (macan_efek.py)
 # tetap bisa kerja dengan np.ndarray seperti sebelumnya, tanpa cv2.
