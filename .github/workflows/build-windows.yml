@@ -56,7 +56,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.OPENCV_INSTALL_DIR }}
-          key: ${{ runner.os }}-opencv-${{ env.OPENCV_VERSION }}-${{ hashFiles('.github/workflows/build-windows.yml') }}
+          # CATATAN: key sebelumnya nge-hash '.github/workflows/build-windows.yml'
+          # (beda nama sama file workflow ini, build-windows2.yml), jadi
+          # perubahan CMake flag di step "Build OpenCV" gak pernah bikin
+          # cache-nya bust otomatis -- OpenCV lama (tanpa calib3d/features2d/
+          # flann) terus ke-reuse walau flag ON-nya udah bener. Dua fix:
+          # 1) hashFiles pola wildcard biar match file workflow ini apa pun
+          #    namanya persisnya di repo, dan otomatis bust kalau isinya beda.
+          # 2) suffix manual "modules-v2" buat MAKSA bust sekali sekarang,
+          #    karena cache lama (key versi sebelumnya) sudah kadung tersimpan
+          #    dan gak akan ke-invalidate sendiri cuma dari perubahan pola hash.
+          key: ${{ runner.os }}-opencv-${{ env.OPENCV_VERSION }}-modules-v2-${{ hashFiles('.github/workflows/build-windows*.yml') }}
 
       - name: Checkout OpenCV source
         if: steps.cache-opencv.outputs.cache-hit != 'true'
@@ -89,9 +99,9 @@ jobs:
             -DBUILD_opencv_videoio=ON `
             -DBUILD_opencv_highgui=OFF `
             -DBUILD_opencv_video=OFF `
-            -DBUILD_opencv_calib3d=OFF `
-            -DBUILD_opencv_features2d=OFF `
-            -DBUILD_opencv_flann=OFF `
+            -DBUILD_opencv_calib3d=ON `
+            -DBUILD_opencv_features2d=ON `
+            -DBUILD_opencv_flann=ON `
             -DBUILD_opencv_objdetect=OFF `
             -DBUILD_opencv_stitching=OFF `
             -DBUILD_opencv_ml=OFF `
