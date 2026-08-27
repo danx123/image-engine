@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.OPENCV_INSTALL_DIR }}
-          key: ${{ runner.os }}-opencv-${{ env.OPENCV_VERSION }}-${{ hashFiles('.github/workflows/build.yml') }}
+          key: ${{ runner.os }}-opencv-${{ env.OPENCV_VERSION }}-${{ hashFiles('.github/workflows/build-windows.yml') }}
 
       - name: Checkout OpenCV source
         if: steps.cache-opencv.outputs.cache-hit != 'true'
@@ -109,7 +109,7 @@ jobs:
             -DWITH_GUI=OFF `
             -DWITH_QT=OFF `
             -DWITH_GTK=OFF `
-            -DWITH_FFMPEG=OFF `
+            -DWITH_FFMPEG=ON `
             -DWITH_GSTREAMER=OFF `
             -DWITH_DSHOW=OFF `
             -DWITH_V4L=OFF `
@@ -134,6 +134,22 @@ jobs:
             -DWITH_GDCM=OFF
 
           cmake --build opencv-build --config Release --target install -j 4
+
+      # Plugin FFmpeg TIDAK ke-copy otomatis oleh `--target install` versi
+      # lama opencv, dan yang lebih penting: dia dimuat lewat LoadLibrary()
+      # saat runtime (bukan link-time import opencv_world.dll), jadi
+      # delvewheel gak bakal ikut nge-bundle dia otomatis. Cari manual di
+      # sini, dari folder build (bukan install dir) karena plugin ini
+      # biasanya ditaruh di bin/ folder build, bukan folder install.
+      - name: Locate FFmpeg plugin DLL
+        if: steps.cache-opencv.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ffmpegDll = Get-ChildItem -Path "opencv-build","${{ env.OPENCV_INSTALL_DIR }}" -Recurse -Filter "opencv_videoio_ffmpeg*.dll" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $ffmpegDll) { throw "opencv_videoio_ffmpeg*.dll not found — WITH_FFMPEG mungkin gagal ke-enable" }
+          # Simpan di dalam OPENCV_INSTALL_DIR biar ikut ke-cache bareng opencv_world
+          Copy-Item $ffmpegDll.FullName -Destination "${{ env.OPENCV_INSTALL_DIR }}"
+          Write-Host "FFmpeg plugin DLL disalin: $($ffmpegDll.Name)"
 
       # OpenCV_DIR + cmake find_package probe TERNYATA rapuh di Windows
       # (bug "CMAKE_SIZEOF_VOID_P is not defined" — opencv-rust manggil
@@ -187,6 +203,26 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist-repaired | Out-Null
           $wheel = Get-ChildItem target\wheels\*.whl | Select-Object -First 1
           delvewheel repair $wheel.FullName --add-path "$env:OPENCV_DLL_DIR" --wheel-dir dist-repaired
+
+      # delvewheel cuma nge-bundle DLL yang jadi link-time dependency
+      # opencv_world.dll. Plugin FFmpeg dimuat via LoadLibrary() saat
+      # runtime (dynamic plugin loading opencv), jadi gak kedeteksi
+      # delvewheel sama sekali — harus ditempel manual ke dalam wheel,
+      # sejajar dengan opencv_world*.dll yang sudah dibundle delvewheel.
+      - name: Bundle FFmpeg plugin DLL into wheel
+        shell: pwsh
+        run: |
+          $ffmpegDll = Get-ChildItem -Path "${{ env.OPENCV_INSTALL_DIR }}" -Filter "opencv_videoio_ffmpeg*.dll" | Select-Object -First 1
+          if (-not $ffmpegDll) { throw "opencv_videoio_ffmpeg*.dll tidak ketemu di OPENCV_INSTALL_DIR" }
+          $wheel = Get-ChildItem dist-repaired\*.whl | Select-Object -First 1
+          $extractDir = "dist-repaired\_extract"
+          Expand-Archive -Path $wheel.FullName -DestinationPath $extractDir -Force
+          $libsDir = Get-ChildItem -Path $extractDir -Directory -Filter "image_engine.libs" | Select-Object -First 1
+          if (-not $libsDir) { throw "Folder *.libs hasil delvewheel gak ketemu di dalam wheel" }
+          Copy-Item $ffmpegDll.FullName -Destination $libsDir.FullName
+          Remove-Item $wheel.FullName
+          Compress-Archive -Path "$extractDir\*" -DestinationPath $wheel.FullName
+          Remove-Item -Recurse -Force $extractDir
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
