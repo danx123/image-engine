@@ -1,4 +1,4 @@
-use numpy::{IntoPyArray, PyArray3, PyReadonlyArray3};
+use numpy::{IntoPyArray, PyArray2, PyArray3, PyReadonlyArray2, PyReadonlyArray3};
 // PENTING: pakai `numpy::ndarray` (re-export), JANGAN nambah dependency
 // `ndarray` sendiri di Cargo.toml. Alasannya: crate `numpy` mendukung
 // rentang versi ndarray yang semver-incompatible (0.15–0.17), dan kalau kita
@@ -8,8 +8,20 @@ use numpy::{IntoPyArray, PyArray3, PyReadonlyArray3};
 // trait `IntoPyArray` di dalam numpy — makanya muncul error "no method named
 // `into_pyarray` found". Dengan selalu pakai `numpy::ndarray::Array3`,
 // versinya dijamin sama-sama satu instance dengan yang dipakai numpy.
-use numpy::ndarray::Array3;
-use opencv::core::{self, Mat, Scalar, CV_8UC1, CV_8UC3, CV_8UC4};
+use numpy::ndarray::{Array2, Array3};
+use opencv::calib3d;
+use opencv::core::{
+    self, DMatch as CvDMatch, DMatchTraitConst, KeyPoint as CvKeyPoint, KeyPointTraitConst,
+    Mat, Ptr, Scalar, CV_8UC1, CV_8UC3, CV_8UC4,
+};
+use opencv::features2d::{
+    self, BFMatcher as CvBFMatcher, BFMatcherTrait, BFMatcherTraitConst,
+    DescriptorMatcherTrait, DescriptorMatcherTraitConst,
+    FlannBasedMatcher as CvFlannBasedMatcher, FlannBasedMatcherTrait,
+    FlannBasedMatcherTraitConst, Feature2DTrait, Feature2DTraitConst, ORB as CvOrb,
+    ORB_TraitConst, ORB_Trait,
+};
+use opencv::flann::{IndexParams, IndexParamsTrait, SearchParams, SearchParamsTrait};
 use opencv::imgcodecs;
 use opencv::imgproc;
 use opencv::prelude::*; // MatTraitConst, MatTrait, MatTraitConstManual, dll.
@@ -17,6 +29,7 @@ use opencv::videoio::{self, VideoCapture as CvVideoCapture, VideoCaptureTrait, V
 use pyo3::exceptions::PyValueError;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 // ============================================================================
 // 🌉 JEMBATAN ERROR — opencv::Error dan pyo3::PyErr sama-sama tipe dari luar
@@ -780,6 +793,353 @@ fn equalize_hist(src: &PyMat) -> CvResult<PyMat> {
 }
 
 // ============================================================================
+// 🧭 FITUR & MATCHING — ORB, BFMatcher, FlannBasedMatcher, findHomography.
+// Ditambahkan untuk Macan Image Finder (reverse image search berbasis
+// ORB + RANSAC), supaya app itu bisa lepas total dari `import cv2`.
+//
+// KONVENSI PENTING beda dari fungsi2 di atas: descriptor ORB (matrix N x 32
+// uint8) sengaja DIBALIKIN LANGSUNG sebagai numpy array (bukan PyMat), karena
+// sisi Python (macan_image_finder) nyimpen descriptor itu ke SQLite lewat
+// operasi numpy murni (.dtype, .astype, .tobytes(), np.frombuffer(...)) —
+// motongin butuh bungkus/bongkar PyMat bolak-balik yang gak perlu.
+// KeyPoint & DMatch juga dibikin PyO3 class sendiri (bukan lewat opencv::core
+// punya) karena field-nya (pt, size, angle, response, octave, class_id /
+// queryIdx, trainIdx, distance) dipakai langsung sebagai atribut Python biasa
+// di serialize_keypoints() & di loop pencocokan — jadi lebih gampang expose
+// sebagai struct data polos daripada nge-wrap boxed type opencv::core.
+// ============================================================================
+
+/// Tiruan cv2.KeyPoint — cuma data biasa (pt, size, angle, response, octave,
+/// class_id), dibuat dari hasil ORB.detect_and_compute() atau langsung dari
+/// Python (deserialize_keypoints menciptakan ulang lewat konstruktor ini).
+#[pyclass(name = "KeyPoint")]
+#[derive(Clone, Copy)]
+struct PyKeyPoint {
+    x: f32,
+    y: f32,
+    #[pyo3(get, set)]
+    size: f32,
+    #[pyo3(get, set)]
+    angle: f32,
+    #[pyo3(get, set)]
+    response: f32,
+    #[pyo3(get, set)]
+    octave: i32,
+    #[pyo3(get, set)]
+    class_id: i32,
+}
+
+#[pymethods]
+impl PyKeyPoint {
+    /// cv2.KeyPoint(x=, y=, size=, angle=, response=, octave=, class_id=)
+    #[new]
+    #[pyo3(signature = (x, y, size, angle=-1.0, response=0.0, octave=0, class_id=-1))]
+    fn new(x: f32, y: f32, size: f32, angle: f32, response: f32, octave: i32, class_id: i32) -> Self {
+        PyKeyPoint { x, y, size, angle, response, octave, class_id }
+    }
+
+    /// kp.pt — tuple (x, y), sama seperti cv2.KeyPoint.pt
+    #[getter]
+    fn pt(&self) -> (f32, f32) {
+        (self.x, self.y)
+    }
+}
+
+impl From<&CvKeyPoint> for PyKeyPoint {
+    fn from(kp: &CvKeyPoint) -> Self {
+        let pt = kp.pt();
+        PyKeyPoint {
+            x: pt.x,
+            y: pt.y,
+            size: kp.size(),
+            angle: kp.angle(),
+            response: kp.response(),
+            octave: kp.octave(),
+            class_id: kp.class_id(),
+        }
+    }
+}
+
+/// Tiruan cv2.DMatch — hasil dari knn_match(). Beda dari cv2 asli, field-nya
+/// snake_case (query_idx/train_idx/img_idx/distance) mengikuti konvensi
+/// method di seluruh image_engine (lihat VideoCapture.is_opened() dkk).
+#[pyclass(name = "DMatch")]
+#[derive(Clone, Copy)]
+struct PyDMatch {
+    #[pyo3(get)]
+    query_idx: i32,
+    #[pyo3(get)]
+    train_idx: i32,
+    #[pyo3(get)]
+    img_idx: i32,
+    #[pyo3(get)]
+    distance: f32,
+}
+
+impl TryFrom<&CvDMatch> for PyDMatch {
+    type Error = EngineError;
+    fn try_from(m: &CvDMatch) -> CvResult<Self> {
+        Ok(PyDMatch {
+            query_idx: m.query_idx()?,
+            train_idx: m.train_idx()?,
+            img_idx: m.img_idx()?,
+            distance: m.distance()?,
+        })
+    }
+}
+
+/// numpy (N, 32) uint8 -> Mat CV_8UC1. Dipakai buat masukin descriptor ORB
+/// (yang disimpan/dipulihkan sisi Python sebagai numpy array) ke pemanggilan
+/// DescriptorMatcher milik OpenCV.
+fn descriptors_to_mat(array: &PyReadonlyArray2<u8>) -> CvResult<Mat> {
+    let arr = array.as_array();
+    let shape = arr.shape();
+    let (rows, cols) = (shape[0] as i32, shape[1] as i32);
+    let data = arr.as_slice().ok_or_else(|| {
+        PyValueError::new_err("Descriptor harus contiguous — pakai np.ascontiguousarray() dulu")
+    })?;
+    let mat = unsafe {
+        Mat::new_rows_cols_with_data(rows, cols, CV_8UC1, data.as_ptr() as *mut std::ffi::c_void, core::Mat_AUTO_STEP)?
+    };
+    Ok(mat.try_clone()?)
+}
+
+/// Mat CV_8UC1 (N x 32) -> numpy (N, 32) uint8. Kebalikan dari
+/// descriptors_to_mat(), dipakai buat balikin hasil ORB.detect_and_compute().
+fn mat_to_descriptors<'py>(py: Python<'py>, mat: &Mat) -> CvResult<Bound<'py, PyArray2<u8>>> {
+    let rows = mat.rows() as usize;
+    let cols = mat.cols() as usize;
+    let bytes = mat.data_bytes()?;
+    let arr = Array2::from_shape_vec((rows, cols), bytes.to_vec())
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(arr.into_pyarray_bound(py))
+}
+
+/// Jalanin knn_match generik buat BFMatcher maupun FlannBasedMatcher — dua-duanya
+/// implement trait yang sama (DescriptorMatcherTrait), jadi logikanya cukup
+/// ditulis sekali di sini.
+///
+/// CATATAN BUILD: DescriptorMatcher C++ (cv::DescriptorMatcher::knnMatch)
+/// punya 2 overload — satu yang pakai train-set yang sudah di-add() ke
+/// matcher, satu lagi yang terima trainDescriptors eksplisit (ini yang kita
+/// pakai, biar sama kayak `flann.knnMatch(query_des, db_des, k=2)` di kode
+/// Python lama). Binding
+/// generator opencv-rust biasanya kasih nama method kedua ini `knn_train_match`.
+/// Kalau pas `cargo build` ternyata nama methodnya beda (mis. `knn_match_1`),
+/// tinggal ganti nama panggilan di bawah ini saja — jangan ubah bagian lain.
+fn run_knn_match(
+    matcher: &mut impl DescriptorMatcherTrait,
+    query_des: PyReadonlyArray2<u8>,
+    train_des: PyReadonlyArray2<u8>,
+    k: i32,
+) -> CvResult<Vec<Vec<PyDMatch>>> {
+    let query_mat = descriptors_to_mat(&query_des)?;
+    let train_mat = descriptors_to_mat(&train_des)?;
+
+    let mut matches: core::Vector<core::Vector<CvDMatch>> = core::Vector::new();
+    matcher.knn_train_match(&query_mat, &train_mat, &mut matches, k, &core::no_array(), false)?;
+
+    let mut out = Vec::with_capacity(matches.len());
+    for row in matches.iter() {
+        let mut row_out = Vec::with_capacity(row.len());
+        for m in row.iter() {
+            row_out.push(PyDMatch::try_from(&m)?);
+        }
+        out.push(row_out);
+    }
+    Ok(out)
+}
+
+/// cv2.ORB — feature detector + descriptor extractor.
+#[pyclass(name = "ORB", unsendable)]
+struct Orb {
+    inner: Ptr<CvOrb>,
+}
+
+/// cv2.ORB_create(nfeatures=..., ...) — parameter lain disediakan biar
+/// lengkap, tapi macan_image_finder cuma pernah pakai `nfeatures`.
+#[pyfunction]
+#[pyo3(signature = (
+    nfeatures=500, scale_factor=1.2, nlevels=8, edge_threshold=31,
+    first_level=0, wta_k=2, patch_size=31, fast_threshold=20
+))]
+fn orb_create(
+    nfeatures: i32,
+    scale_factor: f32,
+    nlevels: i32,
+    edge_threshold: i32,
+    first_level: i32,
+    wta_k: i32,
+    patch_size: i32,
+    fast_threshold: i32,
+) -> CvResult<Orb> {
+    let inner = <dyn CvOrb>::create(
+        nfeatures,
+        scale_factor,
+        nlevels,
+        edge_threshold,
+        first_level,
+        wta_k,
+        features2d::ORB_ScoreType::HARRIS_SCORE,
+        patch_size,
+        fast_threshold,
+    )?;
+    Ok(Orb { inner })
+}
+
+#[pymethods]
+impl Orb {
+    /// orb.detect_and_compute(image, mask) — mirip cv2 `detectAndCompute`,
+    /// balikin (list[KeyPoint], descriptors atau None kalau kosong).
+    #[pyo3(signature = (image, mask=None))]
+    fn detect_and_compute<'py>(
+        &mut self,
+        py: Python<'py>,
+        image: &PyMat,
+        mask: Option<&PyMat>,
+    ) -> CvResult<(Vec<PyKeyPoint>, Option<Bound<'py, PyArray2<u8>>>)> {
+        let image = &image.inner;
+        let mask_mat = match mask {
+            Some(m) => m.inner.clone(),
+            None => Mat::default(),
+        };
+        let mut keypoints: core::Vector<CvKeyPoint> = core::Vector::new();
+        let mut descriptors = Mat::default();
+        self.inner
+            .detect_and_compute(image, &mask_mat, &mut keypoints, &mut descriptors, false)?;
+
+        let py_keypoints: Vec<PyKeyPoint> = keypoints.iter().map(|kp| PyKeyPoint::from(&kp)).collect();
+
+        if descriptors.empty() || descriptors.rows() == 0 {
+            return Ok((py_keypoints, None));
+        }
+        Ok((py_keypoints, Some(mat_to_descriptors(py, &descriptors)?)))
+    }
+}
+
+/// cv2.BFMatcher(normType, crossCheck) — brute-force descriptor matcher.
+#[pyclass(name = "BFMatcher", unsendable)]
+struct PyBfMatcher {
+    inner: CvBFMatcher,
+}
+
+#[pymethods]
+impl PyBfMatcher {
+    #[new]
+    #[pyo3(signature = (norm_type=core::NORM_HAMMING, cross_check=false))]
+    fn new(norm_type: i32, cross_check: bool) -> CvResult<Self> {
+        Ok(PyBfMatcher { inner: CvBFMatcher::new(norm_type, cross_check)? })
+    }
+
+    fn knn_match(
+        &mut self,
+        query_des: PyReadonlyArray2<u8>,
+        train_des: PyReadonlyArray2<u8>,
+        k: i32,
+    ) -> CvResult<Vec<Vec<PyDMatch>>> {
+        run_knn_match(&mut self.inner, query_des, train_des, k)
+    }
+}
+
+/// cv2.FlannBasedMatcher(index_params, search_params) — dikonfigurasi lewat
+/// dict Python persis seperti cv2 (mis. algorithm=6/LSH buat descriptor
+/// biner ORB). Dipetakan ke `cv::flann::IndexParams`/`SearchParams` generik
+/// (bukan subclass LshIndexParams) supaya gak perlu upcast Ptr yang ribet.
+#[pyclass(name = "FlannBasedMatcher", unsendable)]
+struct PyFlannBasedMatcher {
+    inner: CvFlannBasedMatcher,
+}
+
+#[pymethods]
+impl PyFlannBasedMatcher {
+    #[new]
+    fn new(index_params: &Bound<'_, PyDict>, search_params: &Bound<'_, PyDict>) -> CvResult<Self> {
+        fn get_i32(d: &Bound<'_, PyDict>, key: &str, default: i32) -> i32 {
+            d.get_item(key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.extract::<i32>().ok())
+                .unwrap_or(default)
+        }
+
+        // algorithm=6 -> FLANN_INDEX_LSH, cocok buat descriptor biner ORB
+        // (persis nilai yang dipakai index_params di SearchWorker Python).
+        let algorithm = get_i32(index_params, "algorithm", 6);
+        let table_number = get_i32(index_params, "table_number", 6);
+        let key_size = get_i32(index_params, "key_size", 12);
+        let multi_probe_level = get_i32(index_params, "multi_probe_level", 1);
+        let checks = get_i32(search_params, "checks", 32);
+
+        let mut idx = IndexParams::new()?;
+        idx.set_algorithm(algorithm)?;
+        idx.set_int("table_number", table_number)?;
+        idx.set_int("key_size", key_size)?;
+        idx.set_int("multi_probe_level", multi_probe_level)?;
+        let idx_ptr = Ptr::new(idx);
+
+        let search = SearchParams::new(checks, 0.0, true)?;
+        let search_ptr = Ptr::new(search);
+
+        Ok(PyFlannBasedMatcher {
+            inner: CvFlannBasedMatcher::new(&idx_ptr, &search_ptr)?,
+        })
+    }
+
+    fn knn_match(
+        &mut self,
+        query_des: PyReadonlyArray2<u8>,
+        train_des: PyReadonlyArray2<u8>,
+        k: i32,
+    ) -> CvResult<Vec<Vec<PyDMatch>>> {
+        run_knn_match(&mut self.inner, query_des, train_des, k)
+    }
+}
+
+/// cv2.findHomography(srcPoints, dstPoints, method, ransacReprojThreshold)
+/// — src/dst_points diterima sebagai numpy float32 shape (N, 1, 2), persis
+/// bentuk yang dihasilkan `np.float32([...]).reshape(-1, 1, 2)` di kode
+/// Python lama. Balikin (M, mask): M None kalau homography gagal dihitung,
+/// mask numpy uint8 shape (N, 1) — bisa langsung dipanggil `.ravel().sum()`.
+#[pyfunction]
+#[pyo3(signature = (src_points, dst_points, method=0, ransac_reproj_threshold=3.0))]
+fn find_homography<'py>(
+    py: Python<'py>,
+    src_points: PyReadonlyArray3<f32>,
+    dst_points: PyReadonlyArray3<f32>,
+    method: i32,
+    ransac_reproj_threshold: f64,
+) -> CvResult<(Option<PyMat>, Option<Bound<'py, PyArray2<u8>>>)> {
+    let src_arr = src_points.as_array();
+    let dst_arr = dst_points.as_array();
+    let n = src_arr.shape()[0];
+
+    let mut src_vec: core::Vector<core::Point2f> = core::Vector::with_capacity(n);
+    let mut dst_vec: core::Vector<core::Point2f> = core::Vector::with_capacity(n);
+    for i in 0..n {
+        src_vec.push(core::Point2f::new(src_arr[[i, 0, 0]], src_arr[[i, 0, 1]]));
+        dst_vec.push(core::Point2f::new(dst_arr[[i, 0, 0]], dst_arr[[i, 0, 1]]));
+    }
+
+    let mut mask = Mat::default();
+    // CATATAN BUILD: urutan parameter di sini ngikutin urutan deklarasi C++
+    // (src, dst, method, ransacReprojThreshold, mask). Kalau signature hasil
+    // bindgen opencv-rust ternyata naruh `mask` di posisi lain, tinggal
+    // sesuaikan urutan argumen panggilan ini saja.
+    let h = calib3d::find_homography(&src_vec, &dst_vec, method, ransac_reproj_threshold, &mut mask)?;
+
+    if h.empty() {
+        return Ok((None, None));
+    }
+
+    let mask_rows = mask.rows() as usize;
+    let mask_bytes = mask.data_bytes()?;
+    let mask_arr = Array2::from_shape_vec((mask_rows, 1), mask_bytes.to_vec())
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok((Some(h.into()), Some(mask_arr.into_pyarray_bound(py))))
+}
+
+// ============================================================================
 // 🎬 VIDEOCAPTURE — SAMA PERSIS DENGAN cv2.VideoCapture (dipakai buat baca
 // metadata video: fps, resolusi, bitrate, dll — bukan buat decode frame).
 // Perlu opencv_videoio dinyalakan di build (lihat config.toml).
@@ -922,6 +1282,15 @@ fn image_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // --- VideoCapture (metadata video) ---
     m.add_class::<VideoCapture>()?;
 
+    // --- Fitur & matching (Macan Image Finder: ORB + RANSAC) ---
+    m.add_class::<PyKeyPoint>()?;
+    m.add_class::<PyDMatch>()?;
+    m.add_class::<Orb>()?;
+    m.add_class::<PyBfMatcher>()?;
+    m.add_class::<PyFlannBasedMatcher>()?;
+    m.add_function(wrap_pyfunction!(orb_create, m)?)?;
+    m.add_function(wrap_pyfunction!(find_homography, m)?)?;
+
     // --- Fungsi efek tingkat tinggi ---
     m.add_function(wrap_pyfunction!(manual_grayscale, m)?)?;
     m.add_function(wrap_pyfunction!(apply_sepia, m)?)?;
@@ -1011,6 +1380,10 @@ fn image_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CAP_PROP_POS_FRAMES", videoio::CAP_PROP_POS_FRAMES)?;
     m.add("CAP_PROP_POS_MSEC", videoio::CAP_PROP_POS_MSEC)?;
     m.add("CAP_ANY", videoio::CAP_ANY)?;
+
+    // Matching (Macan Image Finder)
+    m.add("NORM_HAMMING", core::NORM_HAMMING)?;
+    m.add("RANSAC", calib3d::RANSAC)?;
 
     Ok(())
 }
