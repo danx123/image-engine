@@ -40,6 +40,9 @@ opencv = {
         "imgcodecs",    # Baca/tulis gambar: imread, imwrite
         "photo",        # Efek lanjutan: detailEnhance, edgePreservingFilter
         "videoio",      # VideoCapture (metadata video: fps, resolusi, fourcc, dll)
+        "features2d",   # ORB, BFMatcher, FlannBasedMatcher (Macan Image Finder)
+        "flann",        # dipakai features2d::FlannBasedMatcher (index/search params)
+        "calib3d",      # findHomography + RANSAC (Macan Image Finder)
     ]
 }
 rayon = "1.10"  # Opsional: buat paralel kalau nanti butuh
