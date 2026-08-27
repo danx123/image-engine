@@ -409,6 +409,48 @@ fn canny(
     Ok(dst.into())
 }
 
+/// cv2.HoughLinesP() — Probabilistic Hough line transform.
+///
+/// Beda dari cv2: nggak ada array numpy shape (N,1,4) yang harus di-unwrap
+/// pakai `line[0]` di sisi Python — di sini langsung balikin list of
+/// (x1, y1, x2, y2) tuple, atau `None` kalau nggak ada garis ketemu (biar
+/// pattern `if lines is not None:` di kode Python yang lama tetap kepake
+/// tanpa perubahan behavior).
+#[pyfunction]
+#[pyo3(signature = (src, rho, theta, threshold, min_line_length=0.0, max_line_gap=0.0))]
+fn hough_lines_p(
+    src: &PyMat,
+    rho: f64,
+    theta: f64,
+    threshold: i32,
+    min_line_length: f64,
+    max_line_gap: f64,
+) -> CvResult<Option<Vec<(i32, i32, i32, i32)>>> {
+    let src = &src.inner;
+    let mut lines_mat = Mat::default();
+    imgproc::hough_lines_p(
+        src,
+        &mut lines_mat,
+        rho,
+        theta,
+        threshold,
+        min_line_length,
+        max_line_gap,
+    )?;
+
+    if lines_mat.rows() == 0 {
+        return Ok(None);
+    }
+
+    let mut out = Vec::with_capacity(lines_mat.rows() as usize);
+    for i in 0..lines_mat.rows() {
+        // Tiap baris Mat hasil HoughLinesP adalah satu Vec4i: [x1, y1, x2, y2]
+        let v = *lines_mat.at::<core::Vec4i>(i)?;
+        out.push((v[0], v[1], v[2], v[3]));
+    }
+    Ok(Some(out))
+}
+
 /// cv2.adaptiveThreshold() — dipakai buat garis tepi efek cartoon
 #[pyfunction]
 fn adaptive_threshold(
@@ -743,7 +785,8 @@ fn equalize_hist(src: &PyMat) -> CvResult<PyMat> {
 // Perlu opencv_videoio dinyalakan di build (lihat config.toml).
 // ============================================================================
 
-/// cv2.VideoCapture — buka file video, cuma dipakai baca properti (cap.get)
+/// cv2.VideoCapture — buka file video, bisa baca properti (cap.get) DAN
+/// decode frame (cap.read())
 // Sama kayak PyMat: opencv::videoio::VideoCapture juga bungkus raw pointer
 // yang gak Sync, jadi perlu `unsendable`.
 #[pyclass(unsendable)]
@@ -754,9 +797,13 @@ struct VideoCapture {
 #[pymethods]
 impl VideoCapture {
     /// VideoCapture(path) — otomatis pilih backend terbaik yang tersedia (CAP_ANY)
+    // 🔓 GIL FIX: buka file video (probing container/codec) bisa makan waktu
+    // gak sebentar. Kalau GIL gak dilepas, thread lain (termasuk main/GUI
+    // thread) ketahan nunggu meski VideoCapture ini dipanggil dari QThread
+    // worker — makanya sebelumnya cursor jadi "muter"/busy pas hover video.
     #[new]
-    fn new(path: &str) -> CvResult<Self> {
-        let inner = CvVideoCapture::from_file(path, videoio::CAP_ANY)?;
+    fn new(py: Python<'_>, path: &str) -> CvResult<Self> {
+        let inner = py.allow_threads(|| CvVideoCapture::from_file(path, videoio::CAP_ANY))?;
         Ok(Self { inner })
     }
 
@@ -765,14 +812,46 @@ impl VideoCapture {
         Ok(self.inner.is_opened()?)
     }
 
+    /// 🔍 DEBUG: cap.getBackendName() — buat mastiin backend apa yang
+    /// SEBENARNYA kepilih dari CAP_ANY (FFMPEG vs MSMF vs lainnya). Kalau
+    /// hover video "gak gerak" (seek gak efektif), ini cara paling pasti
+    /// buat konfirmasi apakah backend-nya beda dari yang dipakai cv2 biasa.
+    fn backend_name(&self) -> CvResult<String> {
+        Ok(self.inner.get_backend_name()?)
+    }
+
     /// cap.get(prop_id) — pakai konstanta CAP_PROP_* di bawah
     fn get(&self, prop_id: i32) -> CvResult<f64> {
         Ok(self.inner.get(prop_id)?)
     }
 
     /// cap.set(prop_id, value) — jarang dipakai buat baca metadata, tapi disediakan biar lengkap
-    fn set(&mut self, prop_id: i32, value: f64) -> CvResult<bool> {
-        Ok(self.inner.set(prop_id, value)?)
+    // 🔓 GIL FIX: set(CAP_PROP_POS_FRAMES, ...) = seek, dan seek berbasis
+    // frame number sering butuh decode ulang dari keyframe terdekat —
+    // tergantung GOP codec-nya bisa ratusan ms s/d detik. Ini SUMBER UTAMA
+    // busy cursor saat hover: dipanggil 8x per hover (lihat
+    // VideoHoverPreviewWorker.run()), dan tanpa allow_threads, GIL disandera
+    // penuh durasi seek itu tiap kali dipanggil, walau dari background thread.
+    fn set(&mut self, py: Python<'_>, prop_id: i32, value: f64) -> CvResult<bool> {
+        Ok(py.allow_threads(|| self.inner.set(prop_id, value))?)
+    }
+
+    /// cap.read() — decode frame berikutnya. MIRIP cv2: return (success, frame).
+    /// Kalau gagal/EOF, success=False dan frame=None (persis pola
+    /// `ret, frame = cap.read()` di cv2, biar gampang portingnya).
+    // 🔓 GIL FIX: decode 1 frame juga blocking I/O+CPU (demux+decode).
+    // Sama seperti set(), ini harus lepas GIL selama proses berlangsung,
+    // supaya main thread tetap bisa proses event Qt (mouse move, paint, dll)
+    // walau worker thread lagi sibuk decode di background.
+    fn read(&mut self, py: Python<'_>) -> CvResult<(bool, Option<PyMat>)> {
+        let mut frame = Mat::default();
+        let inner = &mut self.inner;
+        let success = py.allow_threads(|| inner.read(&mut frame))?;
+        if success && !frame.empty() {
+            Ok((true, Some(frame.into())))
+        } else {
+            Ok((false, None))
+        }
     }
 
     /// cap.release()
@@ -834,6 +913,7 @@ fn image_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vconcat, m)?)?;
     m.add_function(wrap_pyfunction!(canny, m)?)?;
     m.add_function(wrap_pyfunction!(adaptive_threshold, m)?)?;
+	m.add_function(wrap_pyfunction!(hough_lines_p, m)?)?;
 
     // --- Jembatan numpy <-> Mat ---
     m.add_function(wrap_pyfunction!(numpy_to_mat, m)?)?;
