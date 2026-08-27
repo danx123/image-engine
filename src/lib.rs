@@ -15,13 +15,13 @@ use opencv::core::{
     Mat, Ptr, Scalar, CV_8UC1, CV_8UC3, CV_8UC4,
 };
 use opencv::features2d::{
-    self, BFMatcher as CvBFMatcher, BFMatcherTrait, BFMatcherTraitConst,
+    self, BFMatcher as CvBFMatcher, BFMatcherTraitConst,
     DescriptorMatcherTrait, DescriptorMatcherTraitConst,
     FlannBasedMatcher as CvFlannBasedMatcher, FlannBasedMatcherTrait,
     FlannBasedMatcherTraitConst, Feature2DTrait, Feature2DTraitConst, ORB as CvOrb,
-    ORB_TraitConst, ORB_Trait,
+    ORBTraitConst, ORBTrait,
 };
-use opencv::flann::{IndexParams, IndexParamsTrait, SearchParams, SearchParamsTrait};
+use opencv::flann::{IndexParams, IndexParamsTrait, SearchParams};
 use opencv::imgcodecs;
 use opencv::imgproc;
 use opencv::prelude::*; // MatTraitConst, MatTrait, MatTraitConstManual, dll.
@@ -977,7 +977,7 @@ fn orb_create(
     patch_size: i32,
     fast_threshold: i32,
 ) -> CvResult<Orb> {
-    let inner = <dyn CvOrb>::create(
+    let inner = CvOrb::create(
         nfeatures,
         scale_factor,
         nlevels,
@@ -1074,14 +1074,14 @@ impl PyFlannBasedMatcher {
         let multi_probe_level = get_i32(index_params, "multi_probe_level", 1);
         let checks = get_i32(search_params, "checks", 32);
 
-        let mut idx = IndexParams::new()?;
+        let mut idx = IndexParams::default()?;
         idx.set_algorithm(algorithm)?;
         idx.set_int("table_number", table_number)?;
         idx.set_int("key_size", key_size)?;
         idx.set_int("multi_probe_level", multi_probe_level)?;
         let idx_ptr = Ptr::new(idx);
 
-        let search = SearchParams::new(checks, 0.0, true)?;
+        let search = SearchParams::new(checks, 0.0, true, false)?;
         let search_ptr = Ptr::new(search);
 
         Ok(PyFlannBasedMatcher {
@@ -1129,7 +1129,7 @@ fn find_homography<'py>(
     // (src, dst, method, ransacReprojThreshold, mask). Kalau signature hasil
     // bindgen opencv-rust ternyata naruh `mask` di posisi lain, tinggal
     // sesuaikan urutan argumen panggilan ini saja.
-    let h = calib3d::find_homography(&src_vec, &dst_vec, method, ransac_reproj_threshold, &mut mask)?;
+    let h = calib3d::find_homography(&src_vec, &dst_vec, &mut mask, method, ransac_reproj_threshold)?;
 
     if h.empty() {
         return Ok((None, None));
