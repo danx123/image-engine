@@ -11,7 +11,7 @@ use numpy::{IntoPyArray, PyArray2, PyArray3, PyReadonlyArray2, PyReadonlyArray3}
 use numpy::ndarray::{Array2, Array3};
 use opencv::calib3d;
 use opencv::core::{
-    self, DMatch as CvDMatch, DMatchTraitConst, KeyPoint as CvKeyPoint, KeyPointTraitConst,
+    self, DMatch as CvDMatch, KeyPoint as CvKeyPoint, KeyPointTraitConst,
     Mat, Ptr, Scalar, CV_8UC1, CV_8UC3, CV_8UC4,
 };
 use opencv::features2d::{
@@ -103,6 +103,7 @@ impl From<Mat> for PyMat {
 
 /// cv2.imread() — Baca gambar dari file
 #[pyfunction]
+#[pyo3(signature = (path, flags=None))]
 fn imread(path: &str, flags: Option<i32>) -> CvResult<PyMat> {
     let flags = flags.unwrap_or(imgcodecs::IMREAD_UNCHANGED);
     let mat = imgcodecs::imread(path, flags)?;
@@ -863,6 +864,10 @@ impl From<&CvKeyPoint> for PyKeyPoint {
 /// Tiruan cv2.DMatch — hasil dari knn_match(). Beda dari cv2 asli, field-nya
 /// snake_case (query_idx/train_idx/img_idx/distance) mengikuti konvensi
 /// method di seluruh image_engine (lihat VideoCapture.is_opened() dkk).
+/// CATATAN: beda dari KeyPoint (boxed class, diakses lewat trait
+/// KeyPointTraitConst), DMatch di opencv-rust adalah "simple struct" —
+/// field C++-nya (queryIdx/trainIdx/imgIdx/distance) diekspos LANGSUNG
+/// sebagai public field Rust, bukan lewat trait getter yang me-return Result.
 #[pyclass(name = "DMatch")]
 #[derive(Clone, Copy)]
 struct PyDMatch {
@@ -876,15 +881,14 @@ struct PyDMatch {
     distance: f32,
 }
 
-impl TryFrom<&CvDMatch> for PyDMatch {
-    type Error = EngineError;
-    fn try_from(m: &CvDMatch) -> CvResult<Self> {
-        Ok(PyDMatch {
-            query_idx: m.query_idx()?,
-            train_idx: m.train_idx()?,
-            img_idx: m.img_idx()?,
-            distance: m.distance()?,
-        })
+impl From<&CvDMatch> for PyDMatch {
+    fn from(m: &CvDMatch) -> Self {
+        PyDMatch {
+            query_idx: m.query_idx,
+            train_idx: m.train_idx,
+            img_idx: m.img_idx,
+            distance: m.distance,
+        }
     }
 }
 
@@ -943,7 +947,7 @@ fn run_knn_match(
     for row in matches.iter() {
         let mut row_out = Vec::with_capacity(row.len());
         for m in row.iter() {
-            row_out.push(PyDMatch::try_from(&m)?);
+            row_out.push(PyDMatch::from(&m));
         }
         out.push(row_out);
     }
@@ -1225,6 +1229,7 @@ impl VideoCapture {
         slf
     }
 
+    #[pyo3(signature = (_exc_type=None, _exc_value=None, _traceback=None))]
     fn __exit__(
         &mut self,
         _exc_type: Option<Bound<'_, PyAny>>,
