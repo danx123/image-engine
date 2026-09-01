@@ -29,6 +29,7 @@ use opencv::videoio::{self, VideoCapture as CvVideoCapture, VideoCaptureTrait, V
 use pyo3::exceptions::PyValueError;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use pyo3::types::PyDict;
 
 // ============================================================================
@@ -97,6 +98,39 @@ impl From<Mat> for PyMat {
     }
 }
 
+// mat.rows / mat.cols / mat.channels / mat.shape — baca dimensi LANGSUNG dari
+// header Mat (murah, gak nyentuh data piksel sama sekali). Sebelum ini,
+// satu-satunya cara baca dimensi dari Python adalah mat_to_numpy(mat) dulu,
+// yang MENYALIN SELURUH ISI FRAME ke array numpy baru cuma buat baca (h, w) —
+// itu salah satu penyebab utama thumbnail generation jadi lambat.
+#[pymethods]
+impl PyMat {
+    #[getter]
+    fn rows(&self) -> i32 {
+        self.inner.rows()
+    }
+
+    #[getter]
+    fn cols(&self) -> i32 {
+        self.inner.cols()
+    }
+
+    #[getter]
+    fn channels(&self) -> i32 {
+        self.inner.channels()
+    }
+
+    /// (rows, cols, channels) — mirip numpy_array.shape
+    #[getter]
+    fn shape(&self) -> (i32, i32, i32) {
+        (self.inner.rows(), self.inner.cols(), self.inner.channels())
+    }
+
+    fn empty(&self) -> bool {
+        self.inner.empty()
+    }
+}
+
 // ============================================================================
 // 🔧 FUNGSI DASAR — SAMA PERSIS DENGAN cv2.*
 // ============================================================================
@@ -128,13 +162,43 @@ fn imwrite(path: &str, img: &PyMat, params: Option<Vec<i32>>) -> CvResult<bool> 
     Ok(result)
 }
 
+/// cv2.imencode() — Encode Mat ke buffer bytes (JPEG/PNG/dll) TANPA nulis ke
+/// disk dan TANPA lewat numpy/PIL. Return (success, bytes) sama kayak cv2
+/// (ret, buf = cv2.imencode(...)), bedanya `buf` di sini langsung `bytes`
+/// Python asli (via PyBytes), bukan numpy array — jadi base64.b64encode(buf)
+/// bisa langsung dipanggil tanpa .tobytes().
+///
+/// PENTING soal channel order: sama kayak cv2.imencode, fungsi ini NGANGGEP
+/// input Mat udah dalam BGR (urutan default OpenCV). JANGAN cvt_color ke RGB
+/// dulu sebelum manggil ini — encoder JPEG-nya OpenCV sendiri yang ngurus
+/// konversi warna internal, kalau dikasih Mat yang udah di-convert ke RGB
+/// manual, hasil JPEG-nya warnanya bakal ketuker (merah<->biru).
+#[pyfunction]
+#[pyo3(signature = (ext, img, params=None))]
+fn imencode<'py>(
+    py: Python<'py>,
+    ext: &str,
+    img: &PyMat,
+    params: Option<Vec<i32>>,
+) -> CvResult<(bool, Bound<'py, PyBytes>)> {
+    let src = &img.inner;
+    let params: core::Vector<i32> = core::Vector::from(params.unwrap_or_default());
+    let mut buf: core::Vector<u8> = core::Vector::new();
+    // 🔓 GIL FIX: encode JPEG itu CPU-bound (kompresi DCT dkk), bisa makan
+    // beberapa ms buat frame gede. Lepas GIL biar thread lain (GUI/IPC
+    // bridge) gak ketahan pas ini dipanggil bareng dari thread pool.
+    let success = py.allow_threads(|| imgcodecs::imencode(ext, src, &mut buf, &params))?;
+    let bytes = PyBytes::new_bound(py, buf.as_slice());
+    Ok((success, bytes))
+}
+
 /// cv2.cvtColor() — Ubah ruang warna
 #[pyfunction]
 #[pyo3(signature = (src, code, dst_cn=0))]
-fn cvt_color(src: &PyMat, code: i32, dst_cn: i32) -> CvResult<PyMat> {
+fn cvt_color(py: Python<'_>, src: &PyMat, code: i32, dst_cn: i32) -> CvResult<PyMat> {
     let src = &src.inner;
     let mut dst = Mat::default();
-    imgproc::cvt_color(src, &mut dst, code, dst_cn)?;
+    py.allow_threads(|| imgproc::cvt_color(src, &mut dst, code, dst_cn))?;
     Ok(dst.into())
 }
 
@@ -142,6 +206,7 @@ fn cvt_color(src: &PyMat, code: i32, dst_cn: i32) -> CvResult<PyMat> {
 #[pyfunction]
 #[pyo3(signature = (src, dsize=None, fx=0.0, fy=0.0, interpolation=None))]
 fn resize(
+    py: Python<'_>,
     src: &PyMat,
     dsize: Option<(i32, i32)>,
     fx: f64,
@@ -155,7 +220,34 @@ fn resize(
         None => core::Size::new(0, 0),
     };
     let interpolation = interpolation.unwrap_or(imgproc::INTER_LINEAR);
-    imgproc::resize(src, &mut dst, dsize, fx, fy, interpolation)?;
+    // 🔓 GIL FIX: resize frame video (bisa 1080p/4K) itu CPU-bound, sebelum
+    // ini GIL ketahan selama resize jalan — nyandera thread lain (termasuk
+    // GUI thread) kalau dipanggil dari background/thread pool.
+    py.allow_threads(|| imgproc::resize(src, &mut dst, dsize, fx, fy, interpolation))?;
+    Ok(dst.into())
+}
+
+/// cv2.copyMakeBorder() — Tambah border/padding di sekeliling gambar.
+/// Dipakai buat letterbox (mis. pad hasil resize ke ukuran canvas tetap
+/// kayak 120x68) tanpa harus bikin np.zeros() + slice-assign manual di Python.
+#[pyfunction]
+#[pyo3(signature = (src, top, bottom, left, right, border_type=None, value=None))]
+fn copy_make_border(
+    src: &PyMat,
+    top: i32,
+    bottom: i32,
+    left: i32,
+    right: i32,
+    border_type: Option<i32>,
+    value: Option<(f64, f64, f64, f64)>,
+) -> CvResult<PyMat> {
+    let src = &src.inner;
+    let mut dst = Mat::default();
+    let border_type = border_type.unwrap_or(core::BORDER_CONSTANT);
+    let scalar = value
+        .map(|(a, b, c, d)| Scalar::new(a, b, c, d))
+        .unwrap_or_default();
+    core::copy_make_border(src, &mut dst, top, bottom, left, right, border_type, scalar)?;
     Ok(dst.into())
 }
 
@@ -1252,6 +1344,8 @@ fn image_engine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // --- Fungsi dasar ---
     m.add_function(wrap_pyfunction!(imread, m)?)?;
     m.add_function(wrap_pyfunction!(imwrite, m)?)?;
+    m.add_function(wrap_pyfunction!(imencode, m)?)?;
+    m.add_function(wrap_pyfunction!(copy_make_border, m)?)?;
     m.add_function(wrap_pyfunction!(cvt_color, m)?)?;
     m.add_function(wrap_pyfunction!(resize, m)?)?;
     m.add_function(wrap_pyfunction!(rotate, m)?)?;
