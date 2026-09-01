@@ -181,13 +181,16 @@ fn imencode<'py>(
     img: &PyMat,
     params: Option<Vec<i32>>,
 ) -> CvResult<(bool, Bound<'py, PyBytes>)> {
-    let src = img.inner.clone(); // shallow clone — lihat komentar di cvt_color()
+    let src = img.inner.clone();
     let params: core::Vector<i32> = core::Vector::from(params.unwrap_or_default());
-    let mut buf: core::Vector<u8> = core::Vector::new();
-    // 🔓 GIL FIX: encode JPEG itu CPU-bound (kompresi DCT dkk), bisa makan
-    // beberapa ms buat frame gede. Lepas GIL biar thread lain (GUI/IPC
-    // bridge) gak ketahan pas ini dipanggil bareng dari thread pool.
-    let success = py.allow_threads(|| imgcodecs::imencode(ext, &src, &mut buf, &params))?;
+    
+    // MOVE ownership of `src` and `params` into the closure
+    let (success, buf) = py.allow_threads(move || -> Result<(bool, core::Vector<u8>), opencv::Error> {
+        let mut buf: core::Vector<u8> = core::Vector::new();
+        let success = imgcodecs::imencode(ext, &src, &mut buf, &params)?;
+        Ok((success, buf))
+    })?;
+    
     let bytes = PyBytes::new_bound(py, buf.as_slice());
     Ok((success, bytes))
 }
@@ -196,13 +199,15 @@ fn imencode<'py>(
 #[pyfunction]
 #[pyo3(signature = (src, code, dst_cn=0))]
 fn cvt_color(py: Python<'_>, src: &PyMat, code: i32, dst_cn: i32) -> CvResult<PyMat> {
-    // clone() Mat di opencv itu shallow (refcount bump ke buffer data, BUKAN
-    // copy piksel) — dibutuhin di sini karena Mat cuma Send, bukan Sync, jadi
-    // closure allow_threads gak bisa nangkep `&Mat` (perlu Sync), tapi bisa
-    // nangkep Mat yang di-OWN (perlu Send doang).
     let src = src.inner.clone();
-    let mut dst = Mat::default();
-    py.allow_threads(|| imgproc::cvt_color(&src, &mut dst, code, dst_cn))?;
+    
+    // Initialize dst inside and return it
+    let dst = py.allow_threads(move || -> Result<Mat, opencv::Error> {
+        let mut dst = Mat::default();
+        imgproc::cvt_color(&src, &mut dst, code, dst_cn)?;
+        Ok(dst)
+    })?;
+    
     Ok(dst.into())
 }
 
@@ -217,17 +222,19 @@ fn resize(
     fy: f64,
     interpolation: Option<i32>,
 ) -> CvResult<PyMat> {
-    let src = src.inner.clone(); // shallow clone — lihat komentar di cvt_color()
-    let mut dst = Mat::default();
+    let src = src.inner.clone(); 
     let dsize = match dsize {
         Some((w, h)) => core::Size::new(w, h),
         None => core::Size::new(0, 0),
     };
     let interpolation = interpolation.unwrap_or(imgproc::INTER_LINEAR);
-    // 🔓 GIL FIX: resize frame video (bisa 1080p/4K) itu CPU-bound, sebelum
-    // ini GIL ketahan selama resize jalan — nyandera thread lain (termasuk
-    // GUI thread) kalau dipanggil dari background/thread pool.
-    py.allow_threads(|| imgproc::resize(&src, &mut dst, dsize, fx, fy, interpolation))?;
+    
+    let dst = py.allow_threads(move || -> Result<Mat, opencv::Error> {
+        let mut dst = Mat::default();
+        imgproc::resize(&src, &mut dst, dsize, fx, fy, interpolation)?;
+        Ok(dst)
+    })?;
+    
     Ok(dst.into())
 }
 
